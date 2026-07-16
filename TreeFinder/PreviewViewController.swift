@@ -106,7 +106,13 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
                                       image: NSImage(systemSymbolName: "folder.badge.gearshape",
                                                      accessibilityDescription: nil)!,
                                       target: nil, action: #selector(syncTerminalFolder))
-    private var terminalView: LocalProcessTerminalView?
+    // 터미널 다중 세션(탭) — "현재 폴더로 이동"은 항상 새 탭 (제작자 확정 2026-07-16, decisions §6)
+    private var terminalSessions: [DropTerminalView] = []
+    private var activeTerminalIndex = 0
+    private var terminalView: LocalProcessTerminalView? {
+        terminalSessions.indices.contains(activeTerminalIndex) ? terminalSessions[activeTerminalIndex] : nil
+    }
+    private let terminalTabBar = TabBarView(height: 30)   // 파일 탭과 동일 필 디자인 (규칙 4)
     // 명령 도움말 밴드 — 터미널 하단 분할(기본 15%, 디바이더 드래그로 조절) (제작자 지시 2026-07-16)
     private var terminalSplit: NSSplitView?
     private let terminalHelpText = NSTextView()
@@ -621,38 +627,36 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
 
     /// 셸은 창당 1개 — 탭 전환·패널 접힘에도 생존 (decisions §6)
     private func ensureTerminal() {
-        guard terminalView == nil else { return }
-        let terminal = DropTerminalView(frame: .zero)
-        terminal.onDropFiles = { [weak self] urls in self?.typePathsInTerminal(urls) }
-        terminal.onCommandSubmit = { [weak self] line in self?.updateTerminalHelp(for: line) }
-        terminal.translatesAutoresizingMaskIntoConstraints = false
-        // [터미널 | 명령 도움말 밴드] 수직 분할 — 셸 재시작 시 터미널만 교체(밴드·분할 유지)
-        let split: NSSplitView
-        if let existing = terminalSplit {
-            split = existing
-        } else {
-            split = NSSplitView()
+        guard terminalSessions.isEmpty else { return }
+        // 최초 구성: 탭 스트립 + [터미널 | 명령 도움말 밴드] 수직 분할
+        if terminalSplit == nil {
+            let split = NSSplitView()
             split.isVertical = false
             split.dividerStyle = .thin
             split.translatesAutoresizingMaskIntoConstraints = false
             split.addArrangedSubview(terminalHelpPane)
             terminalHelpPane.isHidden = true
+            terminalTabBar.translatesAutoresizingMaskIntoConstraints = false
+            terminalTabBar.onSelectTab = { [weak self] in self?.activateTerminal($0) }
+            terminalTabBar.onCloseTab = { [weak self] in self?.closeTerminal($0) }
+            terminalTabBar.onAddTab = { [weak self] in self?.newTerminalTab() }
+            terminalContainer.addSubview(terminalTabBar)
             terminalContainer.addSubview(split, positioned: .below, relativeTo: nil)
-            NSLayoutConstraint.activate([   // 스위치 행 바로 아래까지 꽉 차게 (제작자 지적 — 노란 선 정렬)
-                split.topAnchor.constraint(equalTo: terminalContainer.topAnchor),
+            NSLayoutConstraint.activate([   // 탭 스트립 아래로 분할이 꽉 차게 (노란 선 정렬 유지)
+                terminalTabBar.topAnchor.constraint(equalTo: terminalContainer.topAnchor),
+                terminalTabBar.leadingAnchor.constraint(equalTo: terminalContainer.leadingAnchor),
+                terminalTabBar.trailingAnchor.constraint(equalTo: terminalContainer.trailingAnchor),
+                split.topAnchor.constraint(equalTo: terminalTabBar.bottomAnchor),
                 split.bottomAnchor.constraint(equalTo: terminalContainer.bottomAnchor),
                 split.leadingAnchor.constraint(equalTo: terminalContainer.leadingAnchor),
                 split.trailingAnchor.constraint(equalTo: terminalContainer.trailingAnchor),
             ])
             terminalSplit = split
         }
-        split.insertArrangedSubview(terminal, at: 0)
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let shellName = (shell as NSString).lastPathComponent
-        terminal.startProcess(executable: shell, execName: "-\(shellName)")   // 로그인 셸
-        terminal.menu = buildTerminalMenu(for: terminal)
-        terminalView = terminal
-        applyTerminalFont()
+        terminalSessions = [makeTerminalSession()]
+        activeTerminalIndex = 0
+        terminalSplit?.insertArrangedSubview(terminalSessions[0], at: 0)
+        refreshTerminalTabBar()
         // 기본 안내를 처음부터 표시 — 레이아웃 확정 후 분할 위치 지정
         DispatchQueue.main.async { [weak self] in self?.showTerminalHelp(TerminalHelp.general) }
         if !observingSettings {
@@ -661,6 +665,57 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
                 [weak self] _ in self?.applyTerminalFont()
             }
         }
+    }
+
+    /// 세션 하나 생성 — 로그인 셸 PTY + 드롭/도움말 배선 + 폰트
+    private func makeTerminalSession() -> DropTerminalView {
+        let terminal = DropTerminalView(frame: .zero)
+        terminal.onDropFiles = { [weak self] urls in self?.typePathsInTerminal(urls) }
+        terminal.onCommandSubmit = { [weak self] line in self?.updateTerminalHelp(for: line) }
+        terminal.translatesAutoresizingMaskIntoConstraints = false
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let shellName = (shell as NSString).lastPathComponent
+        terminal.startProcess(executable: shell, execName: "-\(shellName)")   // 로그인 셸
+        terminal.menu = buildTerminalMenu(for: terminal)
+        applyTerminalFont(to: terminal)
+        return terminal
+    }
+
+    /// 탭 전환 — 비활성 세션은 분할에서 떼어내되 참조 유지(PTY 생존, 파일 탭과 같은 규약)
+    private func activateTerminal(_ index: Int) {
+        guard terminalSessions.indices.contains(index) else { return }
+        if index != activeTerminalIndex { terminalView?.removeFromSuperview() }
+        activeTerminalIndex = index
+        let terminal = terminalSessions[index]
+        if terminal.superview == nil { terminalSplit?.insertArrangedSubview(terminal, at: 0) }
+        refreshTerminalTabBar()
+        view.window?.makeFirstResponder(terminal)
+    }
+
+    private func newTerminalTab() {
+        terminalSessions.append(makeTerminalSession())
+        activateTerminal(terminalSessions.count - 1)
+    }
+
+    /// 탭 닫기 — 배열 제거 = 마지막 참조 해제 → PTY 종료(SIGHUP). 마지막 1개는 못 닫음(QC)
+    private func closeTerminal(_ index: Int) {
+        guard terminalSessions.count > 1, terminalSessions.indices.contains(index) else { return }
+        let closing = terminalSessions.remove(at: index)
+        closing.removeFromSuperview()
+        if index == activeTerminalIndex {
+            activeTerminalIndex = -1   // 무효값 — activateTerminal의 이전 뷰 제거를 건너뛰게
+            activateTerminal(min(index, terminalSessions.count - 1))
+        } else {
+            if index < activeTerminalIndex { activeTerminalIndex -= 1 }
+            refreshTerminalTabBar()
+        }
+    }
+
+    private func refreshTerminalTabBar() {
+        let icon = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
+        terminalTabBar.update(
+            items: terminalSessions.indices.map { (icon, String(format: L("Terminal %d"), $0 + 1)) },
+            active: activeTerminalIndex)
     }
 
     /// iTerm2 컨텍스트 메뉴에서 단일 세션에 적용 가능한 항목만 (제작자 지시 2026-07-16)
@@ -701,19 +756,23 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     }
 
     @objc private func restartShell() {
-        terminalView?.removeFromSuperview()                // PTY 마스터 해제 → 기존 셸 SIGHUP
-        terminalView = nil
-        ensureTerminal()
+        guard terminalSessions.indices.contains(activeTerminalIndex) else { return }
+        terminalSessions[activeTerminalIndex].removeFromSuperview()
+        terminalSessions[activeTerminalIndex] = makeTerminalSession()   // 이전 참조 해제 → PTY SIGHUP
+        terminalSplit?.insertArrangedSubview(terminalSessions[activeTerminalIndex], at: 0)
         updateVisibility()
     }
 
     /// 터미널 폰트는 특성을 탐(파워라인 글리프 등) — Settings에서 지정 (제작자 지시 2026-07-16)
     private func applyTerminalFont() {
-        guard let terminalView else { return }
+        terminalSessions.forEach { applyTerminalFont(to: $0) }   // 설정 변경 = 전 세션 반영
+    }
+
+    private func applyTerminalFont(to terminal: LocalProcessTerminalView) {
         let name = UserDefaults.standard.string(forKey: SettingsKeys.terminalFontName) ?? "Menlo"
         let storedSize = UserDefaults.standard.double(forKey: SettingsKeys.terminalFontSize)
         let size = storedSize > 0 ? storedSize : 12
-        terminalView.font = NSFont(name: name, size: size)
+        terminal.font = NSFont(name: name, size: size)
             ?? .monospacedSystemFont(ofSize: size, weight: .regular)
     }
 
@@ -722,11 +781,15 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         "'" + PathPasteboard.normalized(path).replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    /// 수동 동기화 — 셸 유휴 여부와 무관하게 사용자가 명시적으로 누른 경우만 cd (decisions §6)
+    /// 현재 폴더로 이동 = **항상 새 터미널 탭** — 실행 중 프로그램(vi 등)에 cd가 주입되는
+    /// 문서 오염 원천 차단 (제작자 확정 2026-07-17, 기존 "활성 셸에 cd 전송"은 vi 입력 모드 오염 실측으로 폐기)
     @objc private func syncTerminalFolder() {
-        guard let terminalView, let directory = currentDirectory else { return }
-        terminalView.send(txt: "cd \(Self.shellQuoted(directory.path))\n")
-        view.window?.makeFirstResponder(terminalView)
+        guard let directory = currentDirectory else { return }
+        ensureTerminal()
+        terminalSessions.append(makeTerminalSession())
+        activateTerminal(terminalSessions.count - 1)
+        // 새 셸이 프롬프트 전이라도 PTY 입력 버퍼가 보관 — 셸 초기화 후 cd 실행됨
+        terminalView?.send(txt: "cd \(Self.shellQuoted(directory.path))\n")
     }
 
     /// 명령 도움말 밴드 — 터미널 열릴 때부터 표시(기본 안내), 아는 명령 실행 시 해당 치트시트로 교체.
@@ -765,6 +828,10 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
 
     func debugTerminalHelp(_ line: String) {   // TF_TERMINAL_HELP=<명령> — 도움말 밴드 검증
         updateTerminalHelp(for: line)
+    }
+
+    func debugTerminalSync() {   // TF_TERMINAL_SYNC=1 — vi 실행 중 cd 버튼 = 새 탭 검증
+        syncTerminalFolder()
     }
 
     /// TF_TERMINAL_KEYSIM=<명령> — 합성 키 이벤트로 "실제 타이핑 → 감지" 경로 E2E 검증

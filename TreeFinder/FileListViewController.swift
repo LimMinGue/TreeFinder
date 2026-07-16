@@ -9,7 +9,7 @@ final class TabItemView: NSView {
     private let onDropFiles: (Int, [URL], Bool) -> Void
     private var springTimer: Timer?
 
-    init(index: Int, url: URL, active: Bool, closable: Bool,
+    init(index: Int, icon tabIcon: NSImage?, title: String, active: Bool, closable: Bool,
          onSelect: @escaping (Int) -> Void, onClose: @escaping (Int) -> Void,
          onDropFiles: @escaping (Int, [URL], Bool) -> Void) {
         self.index = index
@@ -25,13 +25,9 @@ final class TabItemView: NSView {
         // 색은 init에서 굳히지 않는다 — CGColor는 설정 시점 어피어런스로 고정되어
         // 라이트 컨텍스트에서 만들어진 탭이 다크 창에서 흰 필로 남는 버그 실측(2026-07-16 제작자 제보)
 
-        // 네트워크 브라우즈 탭은 센티널 URL — 파일 경로 파생 금지 (워게임 network_browse)
-        let icon = NSImageView(image: url.isFileURL
-            ? NSWorkspace.shared.icon(forFile: url.path)
-            : (NSImage(systemSymbolName: "globe", accessibilityDescription: nil) ?? NSImage()))
+        let icon = NSImageView(image: tabIcon ?? NSImage())
         icon.translatesAutoresizingMaskIntoConstraints = false
-        let label = NSTextField(labelWithString: url.isFileURL
-            ? FileManager.default.displayName(atPath: url.path) : L("Network"))
+        let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 11)
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -127,7 +123,8 @@ final class TabBarView: NSView {
     }
     private let stack = NSStackView()
 
-    init() {
+    /// height 기본 40 = 상단 컨트롤 밴드 불변식(§11-1). 터미널 내부 스트립 등은 더 낮게 지정 가능.
+    init(height: CGFloat = 40) {
         super.init(frame: .zero)
         stack.orientation = .horizontal
         stack.spacing = 6
@@ -139,7 +136,7 @@ final class TabBarView: NSView {
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
             // 상단 컨트롤 밴드 = 40pt (미리보기 페인의 Preview/Terminal 스위치 행과 동일 —
             // 탭 필(24pt)과 스위치가 같은 세로 위치, 컬럼 헤더 시작 = 터미널 시작선. 제작자 지적 2026-07-16)
-            heightAnchor.constraint(equalToConstant: 40),
+            heightAnchor.constraint(equalToConstant: height),
         ])
     }
 
@@ -155,12 +152,22 @@ final class TabBarView: NSView {
         }
     }
 
+    /// 파일 목록 탭 — URL에서 아이콘·이름 파생(네트워크 센티널 분기 포함)
     func update(urls: [URL], active: Int) {
+        update(items: urls.map { url in
+            url.isFileURL
+                ? (NSWorkspace.shared.icon(forFile: url.path), FileManager.default.displayName(atPath: url.path))
+                : (NSImage(systemSymbolName: "globe", accessibilityDescription: nil), L("Network"))
+        }, active: active)
+    }
+
+    /// 범용 탭 스트립 — 터미널 등 URL 없는 탭도 동일 필 디자인 공유 (규칙 4)
+    func update(items: [(icon: NSImage?, title: String)], active: Int) {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for (index, url) in urls.enumerated() {
+        for (index, item) in items.enumerated() {
             stack.addArrangedSubview(TabItemView(
-                index: index, url: url, active: index == active,
-                closable: urls.count > 1,   // 마지막 1개는 ✕ 숨김 (QC)
+                index: index, icon: item.icon, title: item.title, active: index == active,
+                closable: items.count > 1,   // 마지막 1개는 ✕ 숨김 (QC)
                 onSelect: { [weak self] in self?.onSelectTab?($0) },
                 onClose: { [weak self] in self?.onCloseTab?($0) },
                 onDropFiles: { [weak self] in self?.onDropOnTab?($0, $1, $2) }))
