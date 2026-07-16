@@ -284,7 +284,37 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     private static func usesCustomPreview(_ url: URL) -> Bool {
         if HWPPreview.isHWPFamily(url) { return true }
         let type = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType
-        return type?.conforms(to: .image) ?? false
+        if type?.conforms(to: .image) ?? false { return true }
+        return isPlainTextCandidate(type)   // 내용 스니핑은 백그라운드에서 (제작자 지시 — 확장자 무관)
+    }
+
+    /// 시스템 타입만으로 미리보기가 안 되는 "정체불명 데이터" — 내용이 텍스트인지 스니핑할 후보.
+    /// QL이 이미 잘 그리는 타입(텍스트·이미지·AV·PDF·아카이브)과 폴더는 제외 (제작자 지시 2026-07-16).
+    private static func isPlainTextCandidate(_ type: UTType?) -> Bool {
+        guard let type else { return true }
+        for known in [UTType.text, .image, .audiovisualContent, .pdf, .archive, .directory]
+        where type.conforms(to: known) { return false }
+        return true
+    }
+
+    /// 내용 기반 플레인 텍스트 판정 — 확장자가 아니라 바이트로: NUL 없는 유효 UTF-8이면 텍스트.
+    /// ponytail: UTF-8 한정(EUC-KR 등 레거시 인코딩은 QL 폴백) · 1MB 상한 후 생략 표기.
+    private static func sniffPlainText(_ url: URL) -> String? {
+        let cap = 1_000_000
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: cap) else { return nil }
+        if data.isEmpty { return "" }   // 빈 파일도 텍스트 취급
+        if data.contains(0) { return nil }   // NUL = 바이너리
+        var text = String(data: data, encoding: .utf8)
+        if text == nil, data.count == cap {   // 상한 경계에서 잘린 멀티바이트 방어
+            for trim in 1...3 where text == nil {
+                text = String(data: data.dropLast(trim), encoding: .utf8)
+            }
+        }
+        guard let text else { return nil }
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        return size > cap ? text + "\n\n… (" + L("Preview truncated") + ")" : text
     }
 
     private static func isMarkdown(_ url: URL) -> Bool {
@@ -317,7 +347,9 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
                 if HWPPreview.isHWPFamily(url) {
                     result = HWPPreview.extract(from: url)   // rhwp 전 페이지 → 내장 리소스 폴백
                 } else {
+                    // 이미지 → 페이지 뷰 / 정체불명 데이터가 텍스트면 → 텍스트 뷰 / 둘 다 아니면 QL 폴백
                     result = NSImage(contentsOf: url).map { HWPPreview.Result(pages: [$0], text: nil) }
+                        ?? Self.sniffPlainText(url).map { HWPPreview.Result(pages: [], text: $0) }
                 }
                 DispatchQueue.main.async {
                     guard let self, token == self.hwpLoadToken else { return }   // 선택이 이미 이동함
