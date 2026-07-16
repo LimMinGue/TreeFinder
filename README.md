@@ -144,6 +144,12 @@ open /Applications/TreeFinder.app
 
 ---
 
+## 📝 변경 이력
+
+버전별 상세 내용은 [CHANGELOG.md](CHANGELOG.md) 및 [Releases](https://github.com/LimMinGue/TreeFinder/releases)를 참고하세요.
+
+---
+
 ## 📄 라이선스
 
 [MIT](LICENSE) © 2026 LimMinGue
