@@ -13,3 +13,6 @@ xcuserdata/
 # 기계 로컬 인덱스·시스템 파일
 .codegraph/
 .DS_Store
+
+# vim 스왑 파일
+*.swp
