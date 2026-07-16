@@ -116,26 +116,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // 로컬 네트워크 권한 승인이 끼어들 수 있어 2회 캡처(+4s·+20s 덮어쓰기)
             for delay in [4.0, 20.0] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                    guard let window = wc.window, let view = window.contentView,
-                          let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
-                    window.effectiveAppearance.performAsCurrentDrawingAppearance {
-                        view.cacheDisplay(in: view.bounds, to: rep)
-                    }
-                    let size = view.bounds.size
-                    let composite = NSImage(size: size)
-                    composite.lockFocus()
-                    window.effectiveAppearance.performAsCurrentDrawingAppearance {
-                        NSColor.windowBackgroundColor.setFill()
-                        NSRect(origin: .zero, size: size).fill()
-                    }
-                    rep.draw(in: NSRect(origin: .zero, size: size))
-                    composite.unlockFocus()
-                    if let tiff = composite.tiffRepresentation, let outRep = NSBitmapImageRep(data: tiff) {
-                        try? outRep.representation(using: .png, properties: [:])?
-                            .write(to: URL(fileURLWithPath: "/tmp/treefinder-network.png"))
-                    }
+                    Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-network.png")
                     NSLog("NETWORK hosts: %@", NetworkBrowser.shared.hosts.joined(separator: ", "))
                 }
+            }
+        }
+        // TF_TERMINAL_DROP=<경로> → 터미널 파일 드롭(경로 입력) E2E 검증 (+4s 별도 캡처)
+        if let dropPath = ProcessInfo.processInfo.environment["TF_TERMINAL_DROP"] {
+            let preview = { [weak wc] in
+                wc?.contentViewController?.children
+                    .compactMap { $0 as? NSSplitViewController }.first?
+                    .splitViewItems.last?.viewController as? PreviewViewController
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { preview()?.debugShowTerminal() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { preview()?.debugTerminalDrop(dropPath) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-terminal.png")
             }
         }
         // TF_PREVIEW_FILE=<경로> → 해당 파일을 미리보기에 띄워 정보 테이블(EXIF 포함)을 스냅숏으로 검증
@@ -241,30 +237,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                cg.width > 1 {
                 try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: out)
             }
-            // 창 서버 캡처가 백지를 반환하는 환경 실측(2026-07-16) — 뷰 직접 렌더 병행 저장.
-            // 비브런시 재질은 투명으로 렌더됨(다크 모드 흰 글자가 PNG 흰 바탕에 묻힘) → 창 배경색 위 합성.
-            if let view = window.contentView,
-               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
-                window.effectiveAppearance.performAsCurrentDrawingAppearance {
-                    view.cacheDisplay(in: view.bounds, to: rep)
-                }
-                let size = view.bounds.size
-                let composite = NSImage(size: size)
-                composite.lockFocus()
-                window.effectiveAppearance.performAsCurrentDrawingAppearance {
-                    NSColor.windowBackgroundColor.setFill()
-                    NSRect(origin: .zero, size: size).fill()
-                }
-                rep.draw(in: NSRect(origin: .zero, size: size))
-                composite.unlockFocus()
-                if let tiff = composite.tiffRepresentation, let outRep = NSBitmapImageRep(data: tiff) {
-                    try? outRep.representation(using: .png, properties: [:])?
-                        .write(to: URL(fileURLWithPath: "/tmp/treefinder-window-view.png"))
-                }
-            }
+            // 창 서버 캡처가 백지를 반환하는 환경 실측(2026-07-16) — 뷰 직접 렌더 병행 저장
+            Self.debugCaptureContent(of: window, to: "/tmp/treefinder-window-view.png")
         }
         #endif
     }
+
+    #if DEBUG
+    /// 뷰 직접 렌더 스냅숏 — 창 서버 캡처가 백지인 환경 대응. 비브런시가 투명으로
+    /// 렌더되어 다크 글자가 흰 PNG 바탕에 묻히므로 창 배경색 위에 합성한다(실측 2026-07-16).
+    private static func debugCaptureContent(of window: NSWindow?, to path: String) {
+        guard let window, let view = window.contentView,
+              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        window.effectiveAppearance.performAsCurrentDrawingAppearance {
+            view.cacheDisplay(in: view.bounds, to: rep)
+        }
+        let size = view.bounds.size
+        let composite = NSImage(size: size)
+        composite.lockFocus()
+        window.effectiveAppearance.performAsCurrentDrawingAppearance {
+            NSColor.windowBackgroundColor.setFill()
+            NSRect(origin: .zero, size: size).fill()
+        }
+        rep.draw(in: NSRect(origin: .zero, size: size))
+        composite.unlockFocus()
+        if let tiff = composite.tiffRepresentation, let outRep = NSBitmapImageRep(data: tiff) {
+            try? outRep.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: path))
+        }
+    }
+    #endif
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
