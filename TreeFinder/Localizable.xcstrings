@@ -111,6 +111,16 @@
         }
       }
     },
+    "Any running job in this tab will be terminated.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 탭에서 실행 중인 작업이 있다면 함께 종료됩니다."
+          }
+        }
+      }
+    },
     "Aperture": {
       "localizations": {
         "ko": {
@@ -247,6 +257,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "클립보드"
+          }
+        }
+      }
+    },
+    "Close": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "닫기"
+          }
+        }
+      }
+    },
+    "Close \"%@\"?": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\"%@\" 탭을 닫겠습니까?"
           }
         }
       }
@@ -831,6 +861,16 @@
         }
       }
     },
+    "Leave empty to use the automatic title.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "비워 두면 자동 이름(경로·명령)을 사용합니다."
+          }
+        }
+      }
+    },
     "List": {
       "localizations": {
         "ko": {
@@ -1237,6 +1277,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "이름 변경"
+          }
+        }
+      }
+    },
+    "Rename Terminal Tab": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "터미널 탭 이름 변경"
           }
         }
       }

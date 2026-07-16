@@ -12,6 +12,20 @@ final class DropTerminalView: LocalProcessTerminalView {
     private var inputLine = ""
     private var keyMonitor: Any?
 
+    // 탭 제목 소스 — 우선순위: 사용자 지정 > OSC 제목 > OSC7 경로 > 마지막 명령 > "터미널 N"
+    // (iTerm2식 자동 제목 + 더블클릭 수동 이름, 세션 한정 휘발 — 제작자 지시 2026-07-17)
+    var userTitle: String?
+    var oscTitle: String?
+    var cwdName: String?
+    var lastCommand: String?
+
+    func tabTitle(fallback: String) -> String {
+        for candidate in [userTitle, oscTitle, cwdName, lastCommand] {
+            if let candidate, !candidate.isEmpty { return candidate }
+        }
+        return fallback
+    }
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         registerForDraggedTypes([.fileURL])
@@ -682,8 +696,9 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             terminalHelpPane.isHidden = true
             terminalTabBar.translatesAutoresizingMaskIntoConstraints = false
             terminalTabBar.onSelectTab = { [weak self] in self?.activateTerminal($0) }
-            terminalTabBar.onCloseTab = { [weak self] in self?.closeTerminal($0) }
+            terminalTabBar.onCloseTab = { [weak self] in self?.confirmCloseTerminal($0) }
             terminalTabBar.onAddTab = { [weak self] in self?.newTerminalTab() }
+            terminalTabBar.onDoubleClickTab = { [weak self] in self?.renameTerminalTab($0) }
             terminalContainer.addSubview(terminalTabBar)
             terminalContainer.addSubview(split, positioned: .below, relativeTo: nil)
             NSLayoutConstraint.activate([   // 탭 스트립 아래로 분할이 꽉 차게 (노란 선 정렬 유지)
@@ -718,7 +733,12 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         terminal.onDropFiles = { [weak self, weak terminal] urls in
             self?.typePathsInTerminal(urls, into: terminal)
         }
-        terminal.onCommandSubmit = { [weak self] line in self?.updateTerminalHelp(for: line) }
+        terminal.onCommandSubmit = { [weak self, weak terminal] line in
+            terminal?.lastCommand = line   // 탭 제목 폴백 소스 (iTerm2식)
+            self?.updateTerminalHelp(for: line)
+            self?.refreshTerminalTabBar()
+        }
+        terminal.processDelegate = self   // OSC 제목·OSC7 경로 → 탭 제목 자동화
         terminal.translatesAutoresizingMaskIntoConstraints = false
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let shellName = (shell as NSString).lastPathComponent
@@ -744,6 +764,23 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         activateTerminal(terminalSessions.count - 1)
     }
 
+    /// 닫기 전 확인 — 실행 중 작업이 있을 수 있음 (제작자 지시 2026-07-17). 파괴 버튼은 기본값 아님(HIG)
+    private func confirmCloseTerminal(_ index: Int) {
+        guard terminalSessions.count > 1, terminalSessions.indices.contains(index),
+              let window = view.window else { return }
+        let title = terminalSessions[index].tabTitle(fallback: String(format: L("Terminal %d"), index + 1))
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(format: L("Close \"%@\"?"), title)
+        alert.informativeText = L("Any running job in this tab will be terminated.")
+        alert.addButton(withTitle: L("Cancel"))   // 기본(Return) = 취소 — 실수 방지
+        alert.addButton(withTitle: L("Close"))
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertSecondButtonReturn else { return }
+            self?.closeTerminal(index)
+        }
+    }
+
     /// 탭 닫기 — 배열 제거 = 마지막 참조 해제 → PTY 종료(SIGHUP). 마지막 1개는 못 닫음(QC)
     private func closeTerminal(_ index: Int) {
         guard terminalSessions.count > 1, terminalSessions.indices.contains(index) else { return }
@@ -758,10 +795,33 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         }
     }
 
+    /// 탭 이름 수정(더블클릭) — 세션 한정 휘발, 빈 값 = 자동 이름 복귀 (제작자 지시 2026-07-17)
+    private func renameTerminalTab(_ index: Int) {
+        guard terminalSessions.indices.contains(index), let window = view.window else { return }
+        let terminal = terminalSessions[index]
+        let alert = NSAlert()
+        alert.messageText = L("Rename Terminal Tab")
+        alert.informativeText = L("Leave empty to use the automatic title.")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.stringValue = terminal.userTitle ?? ""
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.addButton(withTitle: L("Save"))
+        alert.addButton(withTitle: L("Cancel"))
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+            terminal.userTitle = name.isEmpty ? nil : name
+            self?.refreshTerminalTabBar()
+        }
+    }
+
     private func refreshTerminalTabBar() {
         let icon = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
         terminalTabBar.update(
-            items: terminalSessions.indices.map { (icon, String(format: L("Terminal %d"), $0 + 1)) },
+            items: terminalSessions.enumerated().map { index, session in
+                (icon, session.tabTitle(fallback: String(format: L("Terminal %d"), index + 1)))
+            },
             active: activeTerminalIndex)
     }
 
@@ -932,4 +992,24 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         infoStack.isHidden = terminal || currentURL == nil
         if terminal, let terminalView { view.window?.makeFirstResponder(terminalView) }
     }
+}
+
+// MARK: - 터미널 프로세스 델리게이트 — 탭 제목 자동화 (iTerm2식, 제작자 지시 2026-07-17)
+extension PreviewViewController: LocalProcessTerminalViewDelegate {
+    func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
+
+    func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
+        (source as? DropTerminalView)?.oscTitle = title
+        refreshTerminalTabBar()
+    }
+
+    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
+        guard let terminal = source as? DropTerminalView else { return }
+        if let directory, let url = URL(string: directory), url.isFileURL {
+            terminal.cwdName = FileManager.default.displayName(atPath: url.path)
+        }
+        refreshTerminalTabBar()
+    }
+
+    func processTerminated(source: TerminalView, exitCode: Int32?) {}
 }

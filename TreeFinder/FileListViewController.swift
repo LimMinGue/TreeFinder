@@ -81,7 +81,17 @@ final class TabItemView: NSView {
         applyPillColors()
     }
 
-    override func mouseDown(with event: NSEvent) { onSelect(index) }   // ✕ 클릭은 버튼이 소비
+    /// 더블클릭 = 이름 수정 등 (터미널 탭 전용 — 미설정이면 무동작)
+    var onDoubleClick: ((Int) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {   // ✕ 클릭은 버튼이 소비
+        if event.clickCount == 2, let onDoubleClick {
+            onDoubleClick(index)
+        } else {
+            onSelect(index)
+        }
+    }
+
     @objc private func closeTapped() { onClose(index) }
 
     // MARK: 드래그 스프링 오픈 + 드롭 (원본 1.1.10 — 호버하면 탭이 열리고, 놓으면 그 폴더로)
@@ -161,16 +171,21 @@ final class TabBarView: NSView {
         }, active: active)
     }
 
+    /// 더블클릭 콜백 — 터미널 탭 이름 수정용 (파일 탭은 미설정 = 무동작)
+    var onDoubleClickTab: ((Int) -> Void)?
+
     /// 범용 탭 스트립 — 터미널 등 URL 없는 탭도 동일 필 디자인 공유 (규칙 4)
     func update(items: [(icon: NSImage?, title: String)], active: Int) {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for (index, item) in items.enumerated() {
-            stack.addArrangedSubview(TabItemView(
+            let tab = TabItemView(
                 index: index, icon: item.icon, title: item.title, active: index == active,
                 closable: items.count > 1,   // 마지막 1개는 ✕ 숨김 (QC)
                 onSelect: { [weak self] in self?.onSelectTab?($0) },
                 onClose: { [weak self] in self?.onCloseTab?($0) },
-                onDropFiles: { [weak self] in self?.onDropOnTab?($0, $1, $2) }))
+                onDropFiles: { [weak self] in self?.onDropOnTab?($0, $1, $2) })
+            tab.onDoubleClick = onDoubleClickTab
+            stack.addArrangedSubview(tab)
         }
         let add = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: L("New Tab"))!,
                            target: self, action: #selector(addClicked))
