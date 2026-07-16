@@ -25,7 +25,9 @@ final class DropTerminalView: LocalProcessTerminalView {
             keyMonitor = nil
         } else if keyMonitor == nil {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                if let self, event.window === self.window, self.window?.firstResponder === self {
+                if let self, event.window === self.window,
+                   let responder = self.window?.firstResponder,
+                   responder === self || (responder as? NSView)?.isDescendant(of: self) == true {
                     self.trackInput(event)
                 }
                 return event
@@ -651,6 +653,8 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         terminal.menu = buildTerminalMenu(for: terminal)
         terminalView = terminal
         applyTerminalFont()
+        // 기본 안내를 처음부터 표시 — 레이아웃 확정 후 분할 위치 지정
+        DispatchQueue.main.async { [weak self] in self?.showTerminalHelp(TerminalHelp.general) }
         if !observingSettings {
             observingSettings = true
             NotificationCenter.default.addObserver(forName: .settingsChanged, object: nil, queue: .main) {
@@ -725,20 +729,19 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         view.window?.makeFirstResponder(terminalView)
     }
 
-    /// 명령 도움말 밴드 — 아는 기본 명령이면 하단 밴드 표시(기본 15%, 디바이더 드래그 조절),
-    /// 모르는 명령이면 자동 숨김 (제작자 지시 2026-07-16 — "vi 입력하면 하단에 기초 설명")
-    private func updateTerminalHelp(for line: String) {
-        guard let entry = TerminalHelp.entry(forCommandLine: line) else {
-            terminalHelpPane.isHidden = true
-            return
-        }
+    /// 명령 도움말 밴드 — 터미널 열릴 때부터 표시(기본 안내), 아는 명령 실행 시 해당 치트시트로 교체.
+    /// 숨기지 않는다 — "안 보여서 없는 줄 알았다" 제작자 피드백. 크기는 디바이더 드래그(기본 15%).
+    private func showTerminalHelp(_ entry: TerminalHelp.Entry) {
         terminalHelpText.textStorage?.setAttributedString(TerminalHelp.render(entry))
         terminalHelpText.scrollToBeginningOfDocument(nil)
-        if terminalHelpPane.isHidden, let split = terminalSplit {
-            terminalHelpPane.isHidden = false
-            split.layoutSubtreeIfNeeded()
-            split.setPosition(split.bounds.height * 0.85, ofDividerAt: 0)   // 기본 = 하단 15%
-        }
+        guard terminalHelpPane.isHidden, let split = terminalSplit else { return }
+        terminalHelpPane.isHidden = false
+        split.layoutSubtreeIfNeeded()
+        split.setPosition(split.bounds.height * 0.85, ofDividerAt: 0)   // 기본 = 하단 15%
+    }
+
+    private func updateTerminalHelp(for line: String) {
+        showTerminalHelp(TerminalHelp.entry(forCommandLine: line) ?? TerminalHelp.general)
     }
 
     /// 파일 드롭 = 전체 경로 입력 (Terminal.app 규약 — 제작자 지시 2026-07-16).
@@ -762,6 +765,23 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
 
     func debugTerminalHelp(_ line: String) {   // TF_TERMINAL_HELP=<명령> — 도움말 밴드 검증
         updateTerminalHelp(for: line)
+    }
+
+    /// TF_TERMINAL_KEYSIM=<명령> — 합성 키 이벤트로 "실제 타이핑 → 감지" 경로 E2E 검증
+    /// (postEvent → sendEvent → 로컬 모니터: 실입력과 동일 디스패치 경로)
+    func debugTerminalKeySim(_ text: String) {
+        guard let window = view.window, let terminalView else { return }
+        window.makeFirstResponder(terminalView)
+        for character in text + "\r" {
+            let string = String(character)
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                characters: string, charactersIgnoringModifiers: string,
+                isARepeat: false, keyCode: 0) else { continue }
+            NSApp.postEvent(event, atStart: false)
+        }
     }
 
     func debugZoomIn() { zoomIn() }   // TF_ZOOM_TEST=1 스냅숏 검증용
