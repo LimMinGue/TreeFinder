@@ -9,6 +9,16 @@ enum TerminalHelp {
         let lines: [(key: String, desc: String)]
     }
 
+    /// 기본 안내 — 터미널 열릴 때부터 표시, 모르는 명령 실행 시에도 이걸로 복귀 (제작자 피드백 2026-07-16)
+    static let general = Entry(title: "명령 도움말 — 명령을 실행하면 해당 사용법이 여기 표시됩니다", lines: [
+        ("vi · nano", "텍스트 편집기 (실행하면 단축키 안내)"),
+        ("ls · cd · pwd", "폴더 내용 보기 · 이동 · 현재 위치"),
+        ("cp · mv · rm", "복사 · 이동/이름 변경 · 삭제"),
+        ("grep · find", "텍스트 검색 · 파일 찾기"),
+        ("tar · zip · unzip", "압축과 해제"),
+        ("man 명령", "모든 명령의 공식 매뉴얼 (q로 종료)"),
+    ])
+
     /// 명령줄 → 항목 조회. sudo 접두·경로(/usr/bin/vi)는 벗겨서 판별.
     static func entry(forCommandLine line: String) -> Entry? {
         var tokens = line.split(separator: " ").map(String.init)

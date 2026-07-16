@@ -134,6 +134,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-terminal.png")
             }
         }
+        // TF_TERMINAL_KEYSIM=<명령> → 합성 키 입력으로 감지 경로까지 E2E 검증
+        if let simCommand = ProcessInfo.processInfo.environment["TF_TERMINAL_KEYSIM"] {
+            let preview = { [weak wc] in
+                wc?.contentViewController?.children
+                    .compactMap { $0 as? NSSplitViewController }.first?
+                    .splitViewItems.last?.viewController as? PreviewViewController
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { preview()?.debugShowTerminal() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { preview()?.debugTerminalKeySim(simCommand) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-keysim.png")
+            }
+        }
         // TF_TERMINAL_HELP=<명령> → 명령 도움말 밴드를 스냅숏으로 검증
         if let helpCommand = ProcessInfo.processInfo.environment["TF_TERMINAL_HELP"] {
             let preview = { [weak wc] in
