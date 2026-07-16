@@ -9,6 +9,9 @@ enum SettingsKeys {
     static let alwaysExtensions = "AlwaysShowExtensions"
     static let showHidden = "ShowHiddenFiles"
     static let expandToOpenFolder = "ExpandToOpenFolder"
+    // 마지막 세션(탭 경로들·활성 탭) — 재실행 시 복원 (제작자 지시 2026-07-17)
+    static let lastTabs = "LastSessionTabs"
+    static let lastActiveTab = "LastSessionActiveTab"
     static let defaultTerminal = "/System/Applications/Utilities/Terminal.app"
 }
 
