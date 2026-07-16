@@ -7,10 +7,53 @@ import WebKit
 /// 파일 드롭을 받는 터미널 — 드롭 = 전체 경로 입력 (Terminal.app 규약, 제작자 지시 2026-07-16)
 final class DropTerminalView: LocalProcessTerminalView {
     var onDropFiles: (([URL]) -> Void)?
+    /// Enter로 제출된 입력 줄 — 명령 도움말 밴드 트리거 (제작자 지시 2026-07-16)
+    var onCommandSubmit: ((String) -> Void)?
+    private var inputLine = ""
+    private var keyMonitor: Any?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         registerForDraggedTypes([.fileURL])
+    }
+
+    // keyDown은 SwiftTerm에서 open이 아니라 오버라이드 불가 — 로컬 모니터로 감청(포커스가 이 뷰일 때만)
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+            keyMonitor = nil
+        } else if keyMonitor == nil {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                if let self, event.window === self.window, self.window?.firstResponder === self {
+                    self.trackInput(event)
+                }
+                return event
+            }
+        }
+    }
+
+    /// ponytail: 키 입력 기반 줄 추적 — 히스토리(↑)·붙여넣기로 만든 명령은 v1 미감지(오탐보다 안전).
+    private func trackInput(_ event: NSEvent) {
+        guard let characters = event.characters else { return }
+        for scalar in characters.unicodeScalars {
+            switch scalar.value {
+            case 0x0D, 0x0A:                     // Enter — 명령 제출
+                let line = inputLine.trimmingCharacters(in: .whitespaces)
+                inputLine = ""
+                if !line.isEmpty { onCommandSubmit?(line) }
+            case 0x7F, 0x08:                     // Backspace
+                if !inputLine.isEmpty { inputLine.removeLast() }
+            case 0x03, 0x15, 0x1B:               // Ctrl+C · Ctrl+U · ESC — 줄 취소
+                inputLine = ""
+            case 0x20...0x7E:                    // 인쇄 가능 ASCII
+                inputLine.append(Character(scalar))
+            case 0xF700...0xF8FF:                // 방향키 등 기능 키 — 추적 불가면 리셋이 오탐보다 안전
+                inputLine = ""
+            default:
+                break
+            }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("코드 전용 생성") }
@@ -62,6 +105,18 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
                                                      accessibilityDescription: nil)!,
                                       target: nil, action: #selector(syncTerminalFolder))
     private var terminalView: LocalProcessTerminalView?
+    // 명령 도움말 밴드 — 터미널 하단 분할(기본 15%, 디바이더 드래그로 조절) (제작자 지시 2026-07-16)
+    private var terminalSplit: NSSplitView?
+    private let terminalHelpText = NSTextView()
+    private lazy var terminalHelpPane: NSScrollView = {
+        terminalHelpText.isEditable = false
+        terminalHelpText.textContainerInset = NSSize(width: 10, height: 8)
+        terminalHelpText.autoresizingMask = [.width]
+        let scroll = NSScrollView()
+        scroll.documentView = terminalHelpText
+        scroll.hasVerticalScroller = true
+        return scroll
+    }()
     private var observingSettings = false
     private var currentURL: URL?
 
@@ -567,14 +622,29 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         guard terminalView == nil else { return }
         let terminal = DropTerminalView(frame: .zero)
         terminal.onDropFiles = { [weak self] urls in self?.typePathsInTerminal(urls) }
+        terminal.onCommandSubmit = { [weak self] line in self?.updateTerminalHelp(for: line) }
         terminal.translatesAutoresizingMaskIntoConstraints = false
-        terminalContainer.addSubview(terminal, positioned: .below, relativeTo: nil)
-        NSLayoutConstraint.activate([   // 스위치 행 바로 아래까지 꽉 차게 (제작자 지적 — 노란 선 정렬)
-            terminal.topAnchor.constraint(equalTo: terminalContainer.topAnchor),
-            terminal.bottomAnchor.constraint(equalTo: terminalContainer.bottomAnchor),
-            terminal.leadingAnchor.constraint(equalTo: terminalContainer.leadingAnchor),
-            terminal.trailingAnchor.constraint(equalTo: terminalContainer.trailingAnchor),
-        ])
+        // [터미널 | 명령 도움말 밴드] 수직 분할 — 셸 재시작 시 터미널만 교체(밴드·분할 유지)
+        let split: NSSplitView
+        if let existing = terminalSplit {
+            split = existing
+        } else {
+            split = NSSplitView()
+            split.isVertical = false
+            split.dividerStyle = .thin
+            split.translatesAutoresizingMaskIntoConstraints = false
+            split.addArrangedSubview(terminalHelpPane)
+            terminalHelpPane.isHidden = true
+            terminalContainer.addSubview(split, positioned: .below, relativeTo: nil)
+            NSLayoutConstraint.activate([   // 스위치 행 바로 아래까지 꽉 차게 (제작자 지적 — 노란 선 정렬)
+                split.topAnchor.constraint(equalTo: terminalContainer.topAnchor),
+                split.bottomAnchor.constraint(equalTo: terminalContainer.bottomAnchor),
+                split.leadingAnchor.constraint(equalTo: terminalContainer.leadingAnchor),
+                split.trailingAnchor.constraint(equalTo: terminalContainer.trailingAnchor),
+            ])
+            terminalSplit = split
+        }
+        split.insertArrangedSubview(terminal, at: 0)
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let shellName = (shell as NSString).lastPathComponent
         terminal.startProcess(executable: shell, execName: "-\(shellName)")   // 로그인 셸
@@ -655,6 +725,22 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         view.window?.makeFirstResponder(terminalView)
     }
 
+    /// 명령 도움말 밴드 — 아는 기본 명령이면 하단 밴드 표시(기본 15%, 디바이더 드래그 조절),
+    /// 모르는 명령이면 자동 숨김 (제작자 지시 2026-07-16 — "vi 입력하면 하단에 기초 설명")
+    private func updateTerminalHelp(for line: String) {
+        guard let entry = TerminalHelp.entry(forCommandLine: line) else {
+            terminalHelpPane.isHidden = true
+            return
+        }
+        terminalHelpText.textStorage?.setAttributedString(TerminalHelp.render(entry))
+        terminalHelpText.scrollToBeginningOfDocument(nil)
+        if terminalHelpPane.isHidden, let split = terminalSplit {
+            terminalHelpPane.isHidden = false
+            split.layoutSubtreeIfNeeded()
+            split.setPosition(split.bounds.height * 0.85, ofDividerAt: 0)   // 기본 = 하단 15%
+        }
+    }
+
     /// 파일 드롭 = 전체 경로 입력 (Terminal.app 규약 — 제작자 지시 2026-07-16).
     /// 개행 없이 경로+공백만 입력 — 명령 완성은 사용자 몫(임의 실행 금지, 보안 위원)
     private func typePathsInTerminal(_ urls: [URL]) {
@@ -672,6 +758,10 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
 
     func debugTerminalDrop(_ path: String) {   // TF_TERMINAL_DROP=<경로> — 드롭 경로 입력 E2E 검증
         typePathsInTerminal([URL(fileURLWithPath: path)])
+    }
+
+    func debugTerminalHelp(_ line: String) {   // TF_TERMINAL_HELP=<명령> — 도움말 밴드 검증
+        updateTerminalHelp(for: line)
     }
 
     func debugZoomIn() { zoomIn() }   // TF_ZOOM_TEST=1 스냅숏 검증용

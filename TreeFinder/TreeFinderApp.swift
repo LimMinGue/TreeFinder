@@ -134,6 +134,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-terminal.png")
             }
         }
+        // TF_TERMINAL_HELP=<명령> → 명령 도움말 밴드를 스냅숏으로 검증
+        if let helpCommand = ProcessInfo.processInfo.environment["TF_TERMINAL_HELP"] {
+            let preview = { [weak wc] in
+                wc?.contentViewController?.children
+                    .compactMap { $0 as? NSSplitViewController }.first?
+                    .splitViewItems.last?.viewController as? PreviewViewController
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { preview()?.debugShowTerminal() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { preview()?.debugTerminalHelp(helpCommand) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-termhelp.png")
+            }
+        }
         // TF_PREVIEW_FILE=<경로> → 해당 파일을 미리보기에 띄워 정보 테이블(EXIF 포함)을 스냅숏으로 검증
         if let previewPath = ProcessInfo.processInfo.environment["TF_PREVIEW_FILE"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
