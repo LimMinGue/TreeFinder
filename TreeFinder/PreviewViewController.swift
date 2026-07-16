@@ -61,7 +61,12 @@ final class DropTerminalView: LocalProcessTerminalView {
     required init?(coder: NSCoder) { fatalError("코드 전용 생성") }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        sender.draggingPasteboard.canReadObject(
+        #if DEBUG
+        NSLog("TERMDROP draggingEntered — 파일 URL 판독: %d",
+              sender.draggingPasteboard.canReadObject(
+                  forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) ? 1 : 0)
+        #endif
+        return sender.draggingPasteboard.canReadObject(
             forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
             ? .copy : super.draggingEntered(sender)
     }
@@ -70,6 +75,41 @@ final class DropTerminalView: LocalProcessTerminalView {
         guard let urls = sender.draggingPasteboard.readObjects(
                   forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
               !urls.isEmpty else { return super.performDragOperation(sender) }
+        #if DEBUG
+        NSLog("TERMDROP performDragOperation — %d개", urls.count)
+        #endif
+        onDropFiles?(urls)
+        return true
+    }
+}
+
+/// 터미널 영역 전체(도움말 밴드·디바이더 포함)를 드롭존으로 — 터미널 본체 미스 드롭 보완 (제작자 제보 2026-07-17)
+final class TerminalSplitView: NSSplitView {
+    var onDropFiles: (([URL]) -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) { fatalError("코드 전용 생성") }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        #if DEBUG
+        NSLog("TERMDROP split draggingEntered")
+        #endif
+        return sender.draggingPasteboard.canReadObject(
+            forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+            ? .copy : super.draggingEntered(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let urls = sender.draggingPasteboard.readObjects(
+                  forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+              !urls.isEmpty else { return super.performDragOperation(sender) }
+        #if DEBUG
+        NSLog("TERMDROP split performDragOperation — %d개", urls.count)
+        #endif
         onDropFiles?(urls)
         return true
     }
@@ -351,11 +391,14 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         return isPlainTextCandidate(type)   // 내용 스니핑은 백그라운드에서 (제작자 지시 — 확장자 무관)
     }
 
-    /// 시스템 타입만으로 미리보기가 안 되는 "정체불명 데이터" — 내용이 텍스트인지 스니핑할 후보.
-    /// QL이 이미 잘 그리는 타입(텍스트·이미지·AV·PDF·아카이브)과 폴더는 제외 (제작자 지시 2026-07-16).
+    /// 내용이 텍스트인지 스니핑할 후보 판정.
+    /// "텍스트 계열이면 QL이 텍스트로 그린다"는 가정은 yaml에서 깨짐(제작자 실측 2026-07-17 —
+    /// QL은 plain-text 계보만 그리고 yaml 등은 아이콘만 냄) → 텍스트 계열도 자체 텍스트 뷰로 통일.
+    /// QL이 리치 렌더하는 것만 제외: 이미지·AV·PDF·아카이브·HTML(웹 렌더)·RTF·CSV/TSV(표 렌더).
     private static func isPlainTextCandidate(_ type: UTType?) -> Bool {
         guard let type else { return true }
-        for known in [UTType.text, .image, .audiovisualContent, .pdf, .archive, .directory]
+        for known in [UTType.image, .audiovisualContent, .pdf, .archive, .directory,
+                      .html, .rtf, .commaSeparatedText, .tabSeparatedText]
         where type.conforms(to: known) { return false }
         return true
     }
@@ -630,7 +673,8 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         guard terminalSessions.isEmpty else { return }
         // 최초 구성: 탭 스트립 + [터미널 | 명령 도움말 밴드] 수직 분할
         if terminalSplit == nil {
-            let split = NSSplitView()
+            let split = TerminalSplitView()
+            split.onDropFiles = { [weak self] urls in self?.typePathsInTerminal(urls) }
             split.isVertical = false
             split.dividerStyle = .thin
             split.translatesAutoresizingMaskIntoConstraints = false
@@ -670,7 +714,10 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     /// 세션 하나 생성 — 로그인 셸 PTY + 드롭/도움말 배선 + 폰트
     private func makeTerminalSession() -> DropTerminalView {
         let terminal = DropTerminalView(frame: .zero)
-        terminal.onDropFiles = { [weak self] urls in self?.typePathsInTerminal(urls) }
+        // 드롭을 받은 그 터미널로 직접 전송 — 활성 인덱스와 무관하게 정확 (제작자 제보 2026-07-17 보강)
+        terminal.onDropFiles = { [weak self, weak terminal] urls in
+            self?.typePathsInTerminal(urls, into: terminal)
+        }
         terminal.onCommandSubmit = { [weak self] line in self?.updateTerminalHelp(for: line) }
         terminal.translatesAutoresizingMaskIntoConstraints = false
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -809,11 +856,11 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
 
     /// 파일 드롭 = 전체 경로 입력 (Terminal.app 규약 — 제작자 지시 2026-07-16).
     /// 개행 없이 경로+공백만 입력 — 명령 완성은 사용자 몫(임의 실행 금지, 보안 위원)
-    private func typePathsInTerminal(_ urls: [URL]) {
-        guard let terminalView, !urls.isEmpty else { return }
+    private func typePathsInTerminal(_ urls: [URL], into target: LocalProcessTerminalView? = nil) {
+        guard let terminal = target ?? terminalView, !urls.isEmpty else { return }
         let quoted = urls.map { Self.shellQuoted($0.path) }.joined(separator: " ")
-        terminalView.send(txt: quoted + " ")
-        view.window?.makeFirstResponder(terminalView)
+        terminal.send(txt: quoted + " ")
+        view.window?.makeFirstResponder(terminal)
     }
 
     #if DEBUG
