@@ -4,6 +4,32 @@ import SwiftTerm
 import UniformTypeIdentifiers
 import WebKit
 
+/// 파일 드롭을 받는 터미널 — 드롭 = 전체 경로 입력 (Terminal.app 규약, 제작자 지시 2026-07-16)
+final class DropTerminalView: LocalProcessTerminalView {
+    var onDropFiles: (([URL]) -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) { fatalError("코드 전용 생성") }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        sender.draggingPasteboard.canReadObject(
+            forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+            ? .copy : super.draggingEntered(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let urls = sender.draggingPasteboard.readObjects(
+                  forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+              !urls.isEmpty else { return super.performDragOperation(sender) }
+        onDropFiles?(urls)
+        return true
+    }
+}
+
 final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKNavigationDelegate {
     /// 수동 동기화 버튼이 cd할 대상 — 폴더 이동 시 MainWindowController가 갱신
     var currentDirectory: URL?
@@ -507,7 +533,8 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     /// 셸은 창당 1개 — 탭 전환·패널 접힘에도 생존 (decisions §6)
     private func ensureTerminal() {
         guard terminalView == nil else { return }
-        let terminal = LocalProcessTerminalView(frame: .zero)
+        let terminal = DropTerminalView(frame: .zero)
+        terminal.onDropFiles = { [weak self] urls in self?.typePathsInTerminal(urls) }
         terminal.translatesAutoresizingMaskIntoConstraints = false
         terminalContainer.addSubview(terminal, positioned: .below, relativeTo: nil)
         NSLayoutConstraint.activate([   // 스위치 행 바로 아래까지 꽉 차게 (제작자 지적 — 노란 선 정렬)
@@ -584,12 +611,24 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             ?? .monospacedSystemFont(ofSize: size, weight: .regular)
     }
 
+    /// NFC 정규화 + 단일 인용 이스케이프 — cd 동기화·파일 드롭 공용 (decisions §6 인젝션 방지)
+    private static func shellQuoted(_ path: String) -> String {
+        "'" + PathPasteboard.normalized(path).replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     /// 수동 동기화 — 셸 유휴 여부와 무관하게 사용자가 명시적으로 누른 경우만 cd (decisions §6)
     @objc private func syncTerminalFolder() {
         guard let terminalView, let directory = currentDirectory else { return }
-        let path = PathPasteboard.normalized(directory.path)   // NFC (§5와 동일 유틸)
-        let quoted = "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"   // 인젝션 방지
-        terminalView.send(txt: "cd \(quoted)\n")
+        terminalView.send(txt: "cd \(Self.shellQuoted(directory.path))\n")
+        view.window?.makeFirstResponder(terminalView)
+    }
+
+    /// 파일 드롭 = 전체 경로 입력 (Terminal.app 규약 — 제작자 지시 2026-07-16).
+    /// 개행 없이 경로+공백만 입력 — 명령 완성은 사용자 몫(임의 실행 금지, 보안 위원)
+    private func typePathsInTerminal(_ urls: [URL]) {
+        guard let terminalView, !urls.isEmpty else { return }
+        let quoted = urls.map { Self.shellQuoted($0.path) }.joined(separator: " ")
+        terminalView.send(txt: quoted + " ")
         view.window?.makeFirstResponder(terminalView)
     }
 
@@ -597,6 +636,10 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     func debugShowTerminal() {   // TF_TERMINAL_TAB=1 스냅숏 검증용
         tabs.selectedSegment = 1
         tabChanged()
+    }
+
+    func debugTerminalDrop(_ path: String) {   // TF_TERMINAL_DROP=<경로> — 드롭 경로 입력 E2E 검증
+        typePathsInTerminal([URL(fileURLWithPath: path)])
     }
 
     func debugZoomIn() { zoomIn() }   // TF_ZOOM_TEST=1 스냅숏 검증용
