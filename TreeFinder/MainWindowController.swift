@@ -518,6 +518,9 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(listItem)
         split.addSplitViewItem(previewItem)
+        // 분할 폭 유지 — 재실행 시 초기화 제보(제작자 2026-07-17). 듀얼 페인(4분할) 저장분은
+        // 3분할 복원 시 AppKit이 무시하는 정도의 한계만 있음(무해).
+        split.splitView.autosaveName = "MainSplit"
 
         let content = MainContentViewController(split: split)
         content.pathBar.onNavigate = { [weak self] url in self?.listController?.show(directory: url) }
@@ -551,6 +554,16 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         }
 
         list.show(directory: directory)
+    }
+
+    /// 마지막 세션(탭·활성 폴더) 복원 — 재실행 초기화 제보(제작자 2026-07-17).
+    /// TF_ 검증 실행에서는 호출하지 않는다(디버그 실행이 사용자 세션을 오염시키지 않게).
+    func restoreLastSession() {
+        listController?.persistsSession = true   // 첫(주) 페인만 저장 주체
+        let defaults = UserDefaults.standard
+        guard let paths = defaults.stringArray(forKey: SettingsKeys.lastTabs), !paths.isEmpty else { return }
+        listController?.restoreSession(tabPaths: paths,
+                                       active: defaults.integer(forKey: SettingsKeys.lastActiveTab))
     }
 }
 

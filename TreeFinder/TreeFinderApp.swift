@@ -62,6 +62,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         #endif
         let wc = MainWindowController(directory: startDirectory)
+        // 마지막 세션(탭·폴더·분할 폭) 복원 — TF_ 검증 실행은 제외(디버그가 사용자 세션 오염 금지)
+        if !ProcessInfo.processInfo.environment.keys.contains(where: { $0.hasPrefix("TF_") }) {
+            wc.restoreLastSession()
+        }
         wc.showWindow(nil)
         windowController = wc
         NSApp.activate(ignoringOtherApps: true)

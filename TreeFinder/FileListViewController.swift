@@ -720,8 +720,26 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         show(directory: tab.url)
     }
 
+    /// 세션 저장 주체 여부 — 주(첫) 페인만 켠다(듀얼 페인 경합 방지). TF_ 검증 실행에선 꺼짐.
+    var persistsSession = false
+
     private func refreshTabBar() {
         tabBar.update(urls: tabURLs, active: activeTab)
+        guard persistsSession else { return }
+        // 탭 변동의 단일 초크포인트 — 여기서 세션 저장 (재실행 복원용, 네트워크 센티널 제외)
+        UserDefaults.standard.set(tabURLs.filter(\.isFileURL).map(\.path), forKey: SettingsKeys.lastTabs)
+        UserDefaults.standard.set(activeTab, forKey: SettingsKeys.lastActiveTab)
+    }
+
+    /// 마지막 세션 복원 — 소멸된 폴더는 걸러냄 (제작자 지시 2026-07-17)
+    func restoreSession(tabPaths: [String], active: Int) {
+        let dirs = tabPaths.map { URL(fileURLWithPath: $0) }.filter {
+            (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+        }
+        guard !dirs.isEmpty else { return }
+        tabs = dirs.map { TabState(url: $0, viewStyle: viewStyle) }
+        activeTab = min(max(0, active), tabs.count - 1)
+        loadActiveTabState()
     }
 
     private func addColumn(_ key: SortKey, title: String, width: CGFloat, minWidth: CGFloat) {
