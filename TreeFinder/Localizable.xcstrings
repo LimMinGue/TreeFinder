@@ -1131,6 +1131,16 @@
         }
       }
     },
+    "Preview truncated": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이후 내용 생략"
+          }
+        }
+      }
+    },
     "Preview:": {
       "localizations": {
         "ko": {
