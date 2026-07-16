@@ -272,6 +272,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     private let tableView = NSTableView()
     private let tabBar = TabBarView()
     private let messageLabel = NSTextField(labelWithString: "")
+    /// 권한 오류 시에만 노출 — 전체 디스크 접근 설정 바로가기 (제작자 제보 2026-07-17)
+    private lazy var fdaButton = NSButton(title: L("Open Full Disk Access Settings…"),
+                                          target: self, action: #selector(openFullDiskAccessSettings(_:)))
 
     // MARK: 뷰 스타일 상태 (워게임 [2026-07-16]_wargame_icon_gallery_view.md)
     private(set) var viewStyle: ViewStyle = .list
@@ -426,7 +429,12 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         messageLabel.textColor = .secondaryLabelColor
         messageLabel.alignment = .center
         messageLabel.isHidden = true
+        messageLabel.maximumNumberOfLines = 0   // 권한 안내 두 줄 표시
+        messageLabel.preferredMaxLayoutWidth = 420
         messageLabel.translatesAutoresizingMaskIntoConstraints = false
+        fdaButton.isHidden = true
+        fdaButton.bezelStyle = .rounded
+        fdaButton.translatesAutoresizingMaskIntoConstraints = false
 
         tabBar.translatesAutoresizingMaskIntoConstraints = false
         tabBar.onSelectTab = { [weak self] index in self?.selectTab(index) }
@@ -443,7 +451,10 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         container.addSubview(galleryBox)
         container.addSubview(collectionScroll)
         container.addSubview(messageLabel)
+        container.addSubview(fdaButton)
         NSLayoutConstraint.activate([
+            fdaButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            fdaButton.topAnchor.constraint(equalTo: messageLabel.bottomAnchor, constant: 12),
             tabBar.topAnchor.constraint(equalTo: container.topAnchor),
             tabBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             tabBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -781,6 +792,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         loadTask = Task { [weak self] in
             var listed: [FileItem] = []
             var failure: String?
+            var permissionDenied = false
             do {
                 listed = try await DirectoryLister.list(
                     directory, showHidden: UserDefaults.standard.bool(forKey: SettingsKeys.showHidden))
@@ -788,15 +800,29 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 return
             } catch {
                 failure = String(format: L("Can't read this folder — %@"), error.localizedDescription)
+                // 휴지통 등 보호 폴더 = 전체 디스크 접근 필요 — 사유만 말고 해결법 안내 (제작자 제보 2026-07-17)
+                permissionDenied = (error as NSError).domain == NSCocoaErrorDomain
+                    && (error as NSError).code == NSFileReadNoPermissionError
+                if permissionDenied {
+                    failure! += "\n\n" + L("Allow TreeFinder under System Settings ▸ Privacy & Security ▸ Full Disk Access, then relaunch the app.")
+                }
             }
             guard let self, !Task.isCancelled else { return }
             self.allItems = listed
             self.rebuildItems(scrollToTop: true)
             self.messageLabel.stringValue = failure ?? ""
             self.messageLabel.isHidden = (failure == nil)
+            self.fdaButton.isHidden = !permissionDenied
             self.selectionDidSync()   // onSelect(nil) + 갤러리 미리보기 초기화
             self.requestFolderSizes()
         }
+    }
+
+    /// 시스템 설정 ▸ 개인정보 보호 및 보안 ▸ 전체 디스크 접근 바로 열기
+    @objc private func openFullDiskAccessSettings(_ sender: Any?) {
+        guard let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     /// 네트워크 브라우즈 항목 재구성 — 발견된 SMB 호스트(Bonjour). 정렬·검색·상태바는 기존 경로 공용.
@@ -812,6 +838,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         // 로컬 네트워크 권한 거부/초기 탐색 중 = 결과 0 — 정직한 상태 라벨 (워게임 §4)
         messageLabel.stringValue = allItems.isEmpty ? L("Searching for network computers…") : ""
         messageLabel.isHidden = !allItems.isEmpty
+        fdaButton.isHidden = true   // 이전 권한 오류 잔상 방지
         rebuildItems(preserveSelection: true)
         selectionDidSync()
         notifyStatus()
