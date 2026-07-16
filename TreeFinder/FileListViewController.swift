@@ -429,8 +429,13 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         messageLabel.textColor = .secondaryLabelColor
         messageLabel.alignment = .center
         messageLabel.isHidden = true
-        messageLabel.maximumNumberOfLines = 0   // 권한 안내 두 줄 표시
+        // labelWithString:은 단일행 라벨 — 랩핑을 켜지 않으면 maximumNumberOfLines=0이어도 잘림(제작자 제보)
+        messageLabel.maximumNumberOfLines = 0
         messageLabel.preferredMaxLayoutWidth = 420
+        messageLabel.lineBreakMode = .byWordWrapping
+        messageLabel.usesSingleLineMode = false
+        messageLabel.cell?.wraps = true
+        messageLabel.cell?.isScrollable = false
         messageLabel.translatesAutoresizingMaskIntoConstraints = false
         fdaButton.isHidden = true
         fdaButton.bezelStyle = .rounded
@@ -468,6 +473,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             messageLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             messageLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             messageLabel.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 16),
+            messageLabel.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
             // 갤러리 박스 내부 — 미리보기가 캡션 위 공간 전부
             galleryPreview.topAnchor.constraint(equalTo: galleryBox.topAnchor, constant: 8),
             galleryPreview.leadingAnchor.constraint(equalTo: galleryBox.leadingAnchor, constant: 8),
