@@ -1511,6 +1511,16 @@
         }
       }
     },
+    "Terminal %d": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "터미널 %d"
+          }
+        }
+      }
+    },
     "Terminal font": {
       "localizations": {
         "ko": {
