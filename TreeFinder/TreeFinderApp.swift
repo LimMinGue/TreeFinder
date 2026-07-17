@@ -249,6 +249,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-termresize.png")
             }
         }
+        // TF_ARCHIVE_SORT=<키> → (TF_PREVIEW_FILE과 병용) 압축 표를 해당 컬럼으로 정렬(헤더 클릭 검증)
+        if let sortKey = ProcessInfo.processInfo.environment["TF_ARCHIVE_SORT"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
+                (wc.contentViewController?.children
+                    .compactMap { $0 as? NSSplitViewController }.first?
+                    .splitViewItems.last?.viewController as? PreviewViewController)?
+                    .debugSortArchive(sortKey)
+            }
+        }
         // TF_OPEN_GETINFO=<경로> → 정보 가져오기 창을 열고 별도 스냅숏으로 검증
         if let infoPath = ProcessInfo.processInfo.environment["TF_OPEN_GETINFO"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {

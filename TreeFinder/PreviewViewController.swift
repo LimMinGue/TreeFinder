@@ -129,7 +129,8 @@ final class TerminalSplitView: NSSplitView {
     }
 }
 
-final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKNavigationDelegate {
+final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKNavigationDelegate,
+                                  NSTableViewDataSource, NSTableViewDelegate {
     /// 수동 동기화 버튼이 cd할 대상 — 폴더 이동 시 MainWindowController가 갱신
     var currentDirectory: URL?
 
@@ -194,6 +195,16 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     private var customPreviewActive = false
     private var hwpResult: HWPPreview.Result?
     private var hwpLoadToken = 0   // 비동기 추출 레이스 방지 — 최신 선택만 반영
+
+    // 압축파일 목록 표 (순번·아이콘+이름·실제 크기) — 2026-07-18 제작자 지시, 위원회 "표" 채택
+    private let archiveContainer = NSView()
+    private let archiveHeader = NSTextField(labelWithString: "")   // "N개 항목" / 빈 아카이브 안내
+    private let archiveScroll = NSScrollView()
+    private let archiveTable = NSTableView()
+    private var archiveEntries: [ArchiveListing.Entry] = []
+    private var archiveIconCache: [String: NSImage] = [:]          // 확장자별 아이콘 캐시(성능 위원)
+    private var archiveActive = false
+    private static let archiveByteFormatter = ByteCountFormatter()
 
     // 확대/축소 컨트롤 (상단 밴드 좌측 — 커스텀 미리보기 활성 시에만 노출)
     private let zoomOutButton = NSButton(title: "−", target: nil, action: #selector(zoomOut))
@@ -297,6 +308,8 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         hwpTextScroll.isHidden = true
         hwpTextScroll.translatesAutoresizingMaskIntoConstraints = false
 
+        setupArchiveTable(in: container)
+
         container.addSubview(tabs)
         container.addSubview(previewView)
         container.addSubview(hwpPagesScroll)
@@ -335,6 +348,12 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             hwpTextScroll.bottomAnchor.constraint(equalTo: previewView.bottomAnchor),
             hwpTextScroll.leadingAnchor.constraint(equalTo: previewView.leadingAnchor),
             hwpTextScroll.trailingAnchor.constraint(equalTo: previewView.trailingAnchor),
+
+            // 압축 목록 표 — 상단 밴드(40pt) 아래, 하단 정보표 위(previewView 영역과 동일)
+            archiveContainer.topAnchor.constraint(equalTo: previewView.topAnchor),
+            archiveContainer.bottomAnchor.constraint(equalTo: previewView.bottomAnchor),
+            archiveContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            archiveContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor),
 
             infoStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             infoStack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
@@ -469,6 +488,7 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         currentURL = url
         hwpLoadToken += 1
         hwpResult = nil
+        archiveActive = false
         markdownActive = url.map(Self.isMarkdown) ?? false
         customPreviewActive = !markdownActive && (url.map(Self.usesCustomPreview) ?? false)
         if let url, markdownActive {
@@ -486,8 +506,8 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
                 if HWPPreview.isHWPFamily(url) {
                     result = HWPPreview.extract(from: url)   // rhwp 전 페이지 → 내장 리소스 폴백
                 } else if Self.isArchive(url) {
-                    // 압축파일 = 내부 목록(텍스트 뷰). 실패(미지원·손상·상한 초과) 시 nil → QL 아이콘 폴백
-                    result = ArchiveListing.list(url).map { HWPPreview.Result(pages: [], text: $0) }
+                    // 압축파일 = 내부 목록(표). 실패(미지원·손상·상한 초과) 시 nil → QL 아이콘 폴백
+                    result = ArchiveListing.list(url).map { HWPPreview.Result(pages: [], text: nil, archive: $0) }
                 } else {
                     // 이미지 → 페이지 뷰 / 정체불명 데이터가 텍스트면 → 텍스트 뷰 / 둘 다 아니면 QL 폴백
                     result = NSImage(contentsOf: url).map { HWPPreview.Result(pages: [$0], text: nil) }
@@ -633,9 +653,13 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     }
 
     private func applyCustomResult(_ result: HWPPreview.Result?) {
+        archiveActive = false
         if let result {
             hwpResult = result
-            if result.pages.isEmpty {
+            if let entries = result.archive {
+                archiveActive = true
+                populateArchive(entries)      // 압축파일 = 표(순번·아이콘+이름·크기)
+            } else if result.pages.isEmpty {
                 hwpTextView.string = result.text ?? ""
                 hwpTextView.scrollToBeginningOfDocument(nil)
             } else {
@@ -648,6 +672,94 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             previewView.previewItem = infoOnlyMode ? nil : currentURL as NSURL?
         }
         updateVisibility()
+    }
+
+    // MARK: 압축파일 목록 표 (2026-07-18 제작자 지시 · 위원회 "표" 채택)
+
+    private func setupArchiveTable(in container: NSView) {
+        archiveContainer.translatesAutoresizingMaskIntoConstraints = false
+        archiveContainer.isHidden = true
+        archiveHeader.font = .systemFont(ofSize: 12)
+        archiveHeader.textColor = .secondaryLabelColor
+        archiveHeader.lineBreakMode = .byTruncatingTail
+        archiveHeader.translatesAutoresizingMaskIntoConstraints = false
+
+        // 컬럼: # 고정 44 · 이름(아이콘+파일명) 가변 · 크기 고정 90. 고정 열은 min=max로 잠그고
+        // uniform 오토리사이즈가 남는 폭을 이름 열에 몰아줌.
+        let idx = NSTableColumn(identifier: .init("idx"))
+        idx.title = "#"; idx.width = 44; idx.minWidth = 44; idx.maxWidth = 44
+        idx.headerCell.alignment = .right
+        let name = NSTableColumn(identifier: .init("name"))
+        name.title = L("Name"); name.minWidth = 120; name.width = 320
+        name.sortDescriptorPrototype = NSSortDescriptor(key: "name", ascending: true)   // 헤더 클릭 정렬
+        let size = NSTableColumn(identifier: .init("size"))
+        size.title = L("Size"); size.width = 90; size.minWidth = 90; size.maxWidth = 90
+        size.headerCell.alignment = .right
+        size.sortDescriptorPrototype = NSSortDescriptor(key: "size", ascending: true)   // "뭐가 큰지" 크기 정렬
+        [idx, name, size].forEach { archiveTable.addTableColumn($0) }
+        archiveTable.rowHeight = 22                                   // 줄간격 여유(제작자 "줄간격 좁음" 해결)
+        archiveTable.usesAlternatingRowBackgroundColors = true        // 교차 행 배경 — 파일 목록과 통일(가독성)
+        archiveTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        archiveTable.style = .inset
+        archiveTable.dataSource = self
+        archiveTable.delegate = self
+        archiveScroll.documentView = archiveTable
+        archiveScroll.hasVerticalScroller = true
+        archiveScroll.translatesAutoresizingMaskIntoConstraints = false
+
+        archiveContainer.addSubview(archiveHeader)
+        archiveContainer.addSubview(archiveScroll)
+        container.addSubview(archiveContainer)
+        NSLayoutConstraint.activate([
+            archiveHeader.topAnchor.constraint(equalTo: archiveContainer.topAnchor, constant: 8),
+            archiveHeader.leadingAnchor.constraint(equalTo: archiveContainer.leadingAnchor, constant: 16),
+            archiveHeader.trailingAnchor.constraint(lessThanOrEqualTo: archiveContainer.trailingAnchor, constant: -16),
+            archiveScroll.topAnchor.constraint(equalTo: archiveHeader.bottomAnchor, constant: 8),
+            archiveScroll.leadingAnchor.constraint(equalTo: archiveContainer.leadingAnchor),
+            archiveScroll.trailingAnchor.constraint(equalTo: archiveContainer.trailingAnchor),
+            archiveScroll.bottomAnchor.constraint(equalTo: archiveContainer.bottomAnchor),
+        ])
+    }
+
+    private func populateArchive(_ entries: [ArchiveListing.Entry]) {
+        archiveEntries = entries
+        archiveHeader.stringValue = entries.isEmpty ? L("This archive is empty.")
+                                                    : String(format: L("%d items"), entries.count)
+        archiveScroll.isHidden = entries.isEmpty     // 빈 아카이브는 헤더 문구만
+        archiveTable.sortDescriptors = []            // 새 아카이브 = 폴더 우선·이름 정렬로 초기화(정렬 화살표 해제)
+        archiveTable.reloadData()
+        if !entries.isEmpty { archiveTable.scrollRowToVisible(0) }
+    }
+
+    /// 헤더 클릭 정렬 — 이름(자연 정렬·폴더 우선) / 크기(폴더는 항상 끝). 순번(#)은 표시 순서라 정렬 키 아님.
+    private func sortArchive(key: String?, ascending: Bool) {
+        switch key {
+        case "size":
+            archiveEntries.sort {
+                if ($0.size == nil) != ($1.size == nil) { return $1.size == nil }   // 폴더(크기 없음)는 끝
+                if let a = $0.size, let b = $1.size, a != b { return ascending ? a < b : a > b }
+                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            }
+        case "name":
+            archiveEntries.sort {
+                if $0.isDirectory != $1.isDirectory { return $0.isDirectory }       // 폴더 우선 유지
+                let order = $0.name.localizedStandardCompare($1.name)
+                return ascending ? order == .orderedAscending : order == .orderedDescending
+            }
+        default:
+            break
+        }
+    }
+
+    /// 확장자→UTType→시스템 아이콘. 파일은 디스크에 없으므로 경로가 아닌 타입으로 조회, 확장자별 캐시(성능 위원).
+    private func archiveIcon(for entry: ArchiveListing.Entry) -> NSImage {
+        let key = entry.isDirectory ? "/dir" : (entry.name as NSString).pathExtension.lowercased()
+        if let cached = archiveIconCache[key] { return cached }
+        let icon = entry.isDirectory
+            ? NSWorkspace.shared.icon(for: .folder)
+            : NSWorkspace.shared.icon(for: UTType(filenameExtension: key) ?? .data)
+        archiveIconCache[key] = icon
+        return icon
     }
 
     // MARK: 확대/축소 (2026-07-16 제작자 지시 — 핀치 + 버튼, 0.25×~5×)
@@ -996,6 +1108,10 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
 
     func debugAddTerminalTab() { newTerminalTab() }   // TF_TERMINAL_RESIZE=1 — 2탭+리사이즈 시 도움말 밴드 검증
 
+    func debugSortArchive(_ key: String) {   // TF_ARCHIVE_SORT=size — 크기 정렬 헤더 클릭 검증(내림차순)
+        archiveTable.sortDescriptors = [NSSortDescriptor(key: key, ascending: false)]
+    }
+
     /// TF_TERMINAL_KEYSIM=<명령> — 합성 키 이벤트로 "실제 타이핑 → 감지" 경로 E2E 검증
     /// (postEvent → sendEvent → 로컬 모니터: 실입력과 동일 디스패치 경로)
     func debugTerminalKeySim(_ text: String) {
@@ -1031,8 +1147,9 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             || customPreviewActive || markdownActive
         let customActive = !terminal && !infoOnlyMode && customPreviewActive && currentURL != nil
         let hasPages = !(hwpResult?.pages.isEmpty ?? true)
-        hwpPagesScroll.isHidden = !(customActive && hasPages)
-        hwpTextScroll.isHidden = !(customActive && !hasPages && hwpResult?.text != nil)
+        archiveContainer.isHidden = !(customActive && archiveActive)
+        hwpPagesScroll.isHidden = !(customActive && !archiveActive && hasPages)
+        hwpTextScroll.isHidden = !(customActive && !archiveActive && !hasPages && hwpResult?.text != nil)
         // 마크다운 에디터 + 저장 버튼(변경 있을 때만)
         let markdownVisible = !terminal && !infoOnlyMode && markdownActive && currentURL != nil
         mdWebView?.isHidden = !markdownVisible
@@ -1046,6 +1163,44 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         placeholder.isHidden = terminal || currentURL != nil
         infoStack.isHidden = terminal || currentURL == nil
         if terminal, let terminalView { view.window?.makeFirstResponder(terminalView) }
+    }
+}
+
+// MARK: - 압축파일 목록 표 데이터 (순번·아이콘+이름·크기, 2026-07-18 제작자 지시)
+extension PreviewViewController {
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        tableView === archiveTable ? archiveEntries.count : 0
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard tableView === archiveTable, row < archiveEntries.count, let column = tableColumn else { return nil }
+        let entry = archiveEntries[row]
+        switch column.identifier.rawValue {
+        case "idx":
+            let cell = CellFactory.text(tableView, identifier: .init("arcIdx"), alignment: .right)
+            cell.textField?.stringValue = "\(row + 1)"
+            return cell
+        case "name":
+            let cell = CellFactory.iconText(tableView, identifier: .init("arcName"))
+            cell.textField?.stringValue = entry.name
+            cell.imageView?.image = archiveIcon(for: entry)
+            return cell
+        case "size":
+            let cell = CellFactory.text(tableView, identifier: .init("arcSize"), alignment: .right)
+            cell.textField?.stringValue = entry.size.map { Self.archiveByteFormatter.string(fromByteCount: $0) } ?? "—"
+            return cell
+        default:
+            return nil
+        }
+    }
+
+    // 표시 전용 — 선택은 허용하되 편집·상호작용 없음(원본 파일 조작 아님)
+    func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool { false }
+
+    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        guard tableView === archiveTable, let sort = tableView.sortDescriptors.first else { return }
+        sortArchive(key: sort.key, ascending: sort.ascending)
+        archiveTable.reloadData()
     }
 }
 

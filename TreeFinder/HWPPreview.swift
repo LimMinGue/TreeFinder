@@ -10,6 +10,7 @@ enum HWPPreview {
     struct Result {
         let pages: [NSImage]   // rhwp 성공 = 전 페이지 / 폴백 = PrvImage 1장 / 텍스트 폴백 = 빈 배열
         let text: String?
+        var archive: [ArchiveListing.Entry]? = nil   // 압축파일 = 표(순번·아이콘+이름·크기)로 표시
     }
 
     static func isHWPFamily(_ url: URL) -> Bool {
@@ -66,20 +67,32 @@ enum HWPPreview {
     }
 }
 
-/// 압축파일 내부 파일 목록 (2026-07-18 제작자 지시) — /usr/bin/tar -tf(bsdtar/libarchive).
+/// 압축파일 내부 파일 목록 (2026-07-18 제작자 지시) — /usr/bin/tar -tvf(bsdtar/libarchive).
 /// zip·tar·tgz·bz2·xz·jar·apk 등 libarchive가 나열 가능한 포맷 전부. **표시 전용**(추출·실행 없음).
-/// 위원회 교차논쟁 반영: 스트리밍 읽기(바이트 상한)·타임아웃 킬러·stderr 미배수 데드락 차단·
-/// 손실 허용 디코딩·macOS 잡음 필터·제어/양방향 문자 무력화(RTL 확장자 위장 방지)·정렬.
+/// 표(순번·아이콘+이름·실제 크기)로 표시 — 위원회 교차논쟁(2026-07-18) 반영.
+/// 안전장치: 스트리밍 읽기(바이트 상한)·타임아웃 킬러·stderr 미배수 데드락 차단·손실 허용 디코딩·
+/// macOS 잡음 필터·제어/양방향 문자 무력화(RTL 확장자 위장 방지)·폴더 우선 정렬.
 enum ArchiveListing {
-    private static let lineCap = 2000        // 표시 줄 상한 — NSTextView TextKit 레이아웃 비용 기준(성능 위원)
+    /// 표 한 행 = 아카이브 엔트리. size=실제(비압축) 크기, 디렉터리·미파싱은 nil.
+    struct Entry {
+        let name: String        // 표시용(./ 제거·NFC·제어문자 무력화·정렬됨)
+        let size: Int64?
+        let isDirectory: Bool
+    }
+    private static let entryCap = 5000       // 표시 항목 상한 — 테이블은 셀 재사용이나 데이터 배열 방어(성능 위원)
     private static let byteCap = 4 << 20     // 읽기 바이트 상한 4MB — 압축폭탄·거대 gz 스트림 OOM 방어(성능·보안 위원)
     private static let timeoutSeconds = 15.0 // 네트워크 볼륨 무한 행 방지(동시성 위원)
 
+    // tar -tvf 한 줄: "모드 nlink 소유자 그룹 크기 월 일 시각 이름" — 앞 8필드 고정 매칭, 이름은 나머지 전체(공백 보존)
+    private static let lineRegex = try! NSRegularExpression(
+        pattern: #"^(.)\S{9,}\s+\d+\s+\S+\s+\S+\s+(\d+)\s+\S+\s+\S+\s+\S+\s+(.+)$"#)
+
     /// 백그라운드 큐에서 호출할 것. 실패(비아카이브·손상·단일 gz·미지원 포맷·상한 초과) 시 nil → 호출부 QL 폴백.
-    static func list(_ url: URL) -> String? {
+    /// 빈 배열 = 빈 아카이브(정상). 비어 있지 않은 배열 = 표시할 엔트리(폴더 우선 정렬됨).
+    static func list(_ url: URL) -> [Entry]? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        process.arguments = ["-tf", url.path]              // 인자 고정 — 옵션 오인/주입 차단(보안 위원)
+        process.arguments = ["-tvf", url.path]             // verbose = 실제 크기 포함. 인자 고정(옵션 오인/주입 차단)
         // GUI 앱은 로캘이 C라 tar가 비ASCII 파일명을 8진 이스케이프로 뭉갬 → UTF-8 강제(실측).
         // 환경은 통째 교체가 아니라 병합 — PATH 보존(외부 디컴프레서 fork 대비, 보안·플랫폼 위원).
         var env = ProcessInfo.processInfo.environment
@@ -110,29 +123,43 @@ enum ArchiveListing {
         // gz(비-tar)·미지원 포맷·상한 초과(우리가 kill)는 모두 exit≠0 → 폴백. 정상 아카이브만 exit 0.
         guard process.terminationStatus == 0 else { return nil }
         // 손실 허용 UTF-8 디코딩 — 비UTF-8 이름 한 줄만 U+FFFD, 나머지 항목은 보존(QC 위원)
-        return format(String(decoding: data, as: UTF8.self))
+        return parse(String(decoding: data, as: UTF8.self))
     }
 
-    private static func format(_ raw: String) -> String {
-        var entries: [String] = []
+    private static func parse(_ raw: String) -> [Entry] {
+        var entries: [Entry] = []
         raw.enumerateLines { line, _ in
-            var name = line
-            if name.hasPrefix("./") { name.removeFirst(2) }  // tar -C . . 의 상대 접두 제거
-            guard !name.isEmpty, name != "." else { return }
+            guard let entry = parseLine(line) else { return }
             // macOS zip 잡음(리소스 포크·메타) 제외 — 유령 항목·개수 부풀림 방지(QC 위원)
-            let base = ((name.hasSuffix("/") ? String(name.dropLast()) : name) as NSString).lastPathComponent
-            if name.hasPrefix("__MACOSX/") || base == ".DS_Store" || base.hasPrefix("._") { return }
-            entries.append(sanitized(name).precomposedStringWithCanonicalMapping)  // 정규화·무력화는 백그라운드에서
+            let bare = entry.name.hasSuffix("/") ? String(entry.name.dropLast()) : entry.name
+            let base = (bare as NSString).lastPathComponent
+            if entry.name.hasPrefix("__MACOSX/") || base == ".DS_Store" || base.hasPrefix("._") { return }
+            entries.append(entry)
         }
-        let total = entries.count
-        if total == 0 { return L("This archive is empty.") }
-        entries.sort { $0.localizedStandardCompare($1) == .orderedAscending }       // 형제 그룹화(앱 정체성)
-        var shown = entries
-        var truncated = false
-        if shown.count > lineCap { shown = Array(shown.prefix(lineCap)); truncated = true }
-        var text = String(format: L("%d items"), total) + "\n\n" + shown.joined(separator: "\n")
-        if truncated { text += "\n\n… " + String(format: L("and %d more"), total - lineCap) }
-        return text
+        // 폴더 우선 + 이름 자연 정렬 (앱 정체성 — decisions §1). 순번은 이 정렬 순서의 1..N.
+        entries.sort {
+            if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+        return Array(entries.prefix(entryCap))
+    }
+
+    /// verbose 한 줄 → Entry. 정규식으로 모드·크기·이름만 추출(이름 공백 보존). 실패 시 nil.
+    private static func parseLine(_ line: String) -> Entry? {
+        let range = NSRange(line.startIndex..., in: line)
+        guard let match = lineRegex.firstMatch(in: line, range: range),
+              let modeR = Range(match.range(at: 1), in: line),
+              let sizeR = Range(match.range(at: 2), in: line),
+              let nameR = Range(match.range(at: 3), in: line) else { return nil }
+        let modeChar = line[modeR].first
+        var name = String(line[nameR])
+        if let arrow = name.range(of: " -> ") { name = String(name[..<arrow.lowerBound]) }  // 심링크 대상 제거
+        if name.hasPrefix("./") { name.removeFirst(2) }                                      // tar -C . . 상대 접두
+        name = sanitized(name).precomposedStringWithCanonicalMapping
+        guard !name.isEmpty, name != "." else { return nil }
+        let isDirectory = modeChar == "d" || name.hasSuffix("/")
+        if name.hasSuffix("/") { name.removeLast() }   // 폴더는 아이콘으로 구분 — 표시 이름에서 슬래시 제거
+        return Entry(name: name, size: isDirectory ? nil : Int64(line[sizeR]), isDirectory: isDirectory)
     }
 
     /// 제어문자·양방향 서식문자 무력화 — RTL override(U+202E) 확장자 위장·가짜 행 삽입 방지(보안 위원)
