@@ -167,6 +167,9 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         terminalSessions.indices.contains(activeTerminalIndex) ? terminalSessions[activeTerminalIndex] : nil
     }
     private let terminalTabBar = TabBarView(height: 30)   // 파일 탭과 동일 필 디자인 (규칙 4)
+    // 분할 상단 고정 호스트 — 세션 교체는 분할이 아니라 이 안에서(탭 추가 시 디바이더 리셋 방지, 제작자 제보 2026-07-18)
+    // + 세션에 좌우/상하 여백을 줘 SwiftTerm 글자 잘림 완화. 배경은 터미널 색과 일치시켜 여백이 패딩처럼 보이게.
+    private let terminalHost = AppearanceObservingView()
     // 명령 도움말 밴드 — 터미널 하단 분할(기본 15%, 디바이더 드래그로 조절) (제작자 지시 2026-07-16)
     private var terminalSplit: NSSplitView?
     private let terminalHelpText = NSTextView()
@@ -287,6 +290,8 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         hwpTextView.font = .systemFont(ofSize: 12)
         hwpTextView.textContainerInset = NSSize(width: 12, height: 12)
         hwpTextView.autoresizingMask = [.width]
+        hwpTextView.usesFindBar = true   // ⌘F 항목 찾기 — 압축 목록·소스 미리보기 공통 (파워유저 위원)
+        hwpTextView.isIncrementalSearchingEnabled = true
         hwpTextScroll.documentView = hwpTextView
         hwpTextScroll.hasVerticalScroller = true
         hwpTextScroll.isHidden = true
@@ -397,12 +402,26 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         }
     }
 
-    /// 확대/축소 가능 콘텐츠 판정 — HWP 계열 + 일반 이미지(QL은 배율 API가 없어 자체 뷰로)
+    /// 확대/축소 가능 콘텐츠 판정 — HWP 계열 + 압축(내부 목록) + 일반 이미지(QL은 배율 API가 없어 자체 뷰로)
     private static func usesCustomPreview(_ url: URL) -> Bool {
         if HWPPreview.isHWPFamily(url) { return true }
         let type = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType
+        if isArchive(type) { return true }   // 압축파일 = 내부 파일 목록 표시 (제작자 지시 2026-07-18)
         if type?.conforms(to: .image) ?? false { return true }
         return isPlainTextCandidate(type)   // 내용 스니핑은 백그라운드에서 (제작자 지시 — 확장자 무관)
+    }
+
+    /// 내부 목록을 보여줄 아카이브 판정 — 단일 소스(규칙 4).
+    /// 디스크 이미지(dmg·iso·sparseimage: 마운트 대상)와 설치 패키지(pkg·xip: xar 내부 배관 이름만 뜸)는 제외.
+    private static func isArchive(_ type: UTType?) -> Bool {
+        guard let type, type.conforms(to: .archive), !type.conforms(to: .diskImage) else { return false }
+        for id in ["com.apple.installer-package-archive", "com.apple.xip-archive"] {
+            if let excluded = UTType(id), type.conforms(to: excluded) { return false }
+        }
+        return true
+    }
+    private static func isArchive(_ url: URL) -> Bool {
+        isArchive((try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType)
     }
 
     /// 내용이 텍스트인지 스니핑할 후보 판정.
@@ -466,6 +485,9 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
                 let result: HWPPreview.Result?
                 if HWPPreview.isHWPFamily(url) {
                     result = HWPPreview.extract(from: url)   // rhwp 전 페이지 → 내장 리소스 폴백
+                } else if Self.isArchive(url) {
+                    // 압축파일 = 내부 목록(텍스트 뷰). 실패(미지원·손상·상한 초과) 시 nil → QL 아이콘 폴백
+                    result = ArchiveListing.list(url).map { HWPPreview.Result(pages: [], text: $0) }
                 } else {
                     // 이미지 → 페이지 뷰 / 정체불명 데이터가 텍스트면 → 텍스트 뷰 / 둘 다 아니면 QL 폴백
                     result = NSImage(contentsOf: url).map { HWPPreview.Result(pages: [$0], text: nil) }
@@ -643,9 +665,14 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     private func applyZoom(_ transform: (CGFloat) -> CGFloat) {
         guard let scroll = zoomTargetScroll else { return }
         let clamped = min(max(transform(scroll.magnification), scroll.minMagnification), scroll.maxMagnification)
-        // 보이는 영역 중심 유지 — 확대해도 읽던 곳이 그대로
-        let center = NSPoint(x: scroll.contentView.bounds.midX, y: scroll.contentView.bounds.midY)
-        scroll.setMagnification(clamped, centeredAt: center)
+        // 세로는 보던 지점(뷰 세로 중앙) 유지, 가로는 왼쪽 끝 정렬 — 확대해도 좌측이 잘려 옆으로
+        // 스크롤할 필요가 없게(제작자 지시 2026-07-18). centeredAt엔 세로만 의미가 있고, 가로는 확대 후 강제.
+        let anchor = NSPoint(x: scroll.contentView.bounds.midX, y: scroll.contentView.bounds.midY)
+        scroll.setMagnification(clamped, centeredAt: anchor)
+        var origin = scroll.contentView.bounds.origin
+        origin.x = 0
+        scroll.contentView.scroll(to: origin)
+        scroll.reflectScrolledClipView(scroll.contentView)
         updateZoomLabel()
     }
 
@@ -692,7 +719,14 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             split.isVertical = false
             split.dividerStyle = .thin
             split.translatesAutoresizingMaskIntoConstraints = false
+            // 상단 = 터미널 호스트(세션은 이 안에서 교체 — 탭 추가가 분할 디바이더를 리셋하지 않게), 하단 = 도움말 밴드
+            terminalHost.wantsLayer = true
+            refreshTerminalHostBackground()
+            split.addArrangedSubview(terminalHost)
             split.addArrangedSubview(terminalHelpPane)
+            // 리사이즈 흡수는 터미널이, 도움말 밴드는 크기 유지 — 밴드가 리사이즈 때 화면을 덮던 버그 차단(제작자 제보)
+            split.setHoldingPriority(.defaultLow, forSubviewAt: 0)                        // 터미널 = 리사이즈 흡수
+            split.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 1)   // 도움말 = 크기 유지(>250)
             terminalHelpPane.isHidden = true
             terminalTabBar.translatesAutoresizingMaskIntoConstraints = false
             terminalTabBar.onSelectTab = { [weak self] in self?.activateTerminal($0) }
@@ -714,7 +748,7 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         }
         terminalSessions = [makeTerminalSession()]
         activeTerminalIndex = 0
-        terminalSplit?.insertArrangedSubview(terminalSessions[0], at: 0)
+        mountTerminal(terminalSessions[0])
         refreshTerminalTabBar()
         // 기본 안내를 처음부터 표시 — 레이아웃 확정 후 분할 위치 지정
         DispatchQueue.main.async { [weak self] in self?.showTerminalHelp(TerminalHelp.general) }
@@ -748,15 +782,35 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         return terminal
     }
 
-    /// 탭 전환 — 비활성 세션은 분할에서 떼어내되 참조 유지(PTY 생존, 파일 탭과 같은 규약)
+    /// 탭 전환 — 비활성 세션은 호스트에서 떼어내되 배열이 참조 유지(PTY 생존, 파일 탭과 같은 규약)
     private func activateTerminal(_ index: Int) {
         guard terminalSessions.indices.contains(index) else { return }
-        if index != activeTerminalIndex { terminalView?.removeFromSuperview() }
         activeTerminalIndex = index
-        let terminal = terminalSessions[index]
-        if terminal.superview == nil { terminalSplit?.insertArrangedSubview(terminal, at: 0) }
+        mountTerminal(terminalSessions[index])
         refreshTerminalTabBar()
-        view.window?.makeFirstResponder(terminal)
+        view.window?.makeFirstResponder(terminalSessions[index])
+    }
+
+    /// 활성 세션을 호스트에 장착 — 분할이 아니라 호스트 안에서 교체(디바이더 안정, 이슈1) +
+    /// 상하 4·좌우 8pt 여백으로 SwiftTerm 글자 잘림 완화(이슈2). 배열은 안 건드려 PTY 생존.
+    private func mountTerminal(_ terminal: DropTerminalView) {
+        for sub in terminalHost.subviews where sub !== terminal { sub.removeFromSuperview() }
+        guard terminal.superview == nil else { return }   // 이미 장착됨
+        terminal.translatesAutoresizingMaskIntoConstraints = false
+        terminalHost.addSubview(terminal)
+        NSLayoutConstraint.activate([
+            terminal.topAnchor.constraint(equalTo: terminalHost.topAnchor, constant: 4),
+            terminal.bottomAnchor.constraint(equalTo: terminalHost.bottomAnchor, constant: -4),
+            terminal.leadingAnchor.constraint(equalTo: terminalHost.leadingAnchor, constant: 8),
+            terminal.trailingAnchor.constraint(equalTo: terminalHost.trailingAnchor, constant: -8),
+        ])
+    }
+
+    /// 호스트 배경 = 터미널 셀 배경(검정) — 여백이 패딩처럼 보이게. SwiftTerm은 셀을 Color.defaultBackground(0,0,0)로
+    /// 그리는데 뷰 nativeBackgroundColor는 textBackgroundColor(라이트=흰색)라, 흰 여백이 검은 터미널을 두르는 불일치가 생김.
+    /// TreeFinder는 터미널 색을 테마링하지 않으므로 검정으로 고정. ponytail: 터미널 테마 도입 시 getTerminal().backgroundColor 추적으로 승격.
+    private func refreshTerminalHostBackground() {
+        terminalHost.layer?.backgroundColor = NSColor.black.cgColor
     }
 
     private func newTerminalTab() {
@@ -787,7 +841,6 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         let closing = terminalSessions.remove(at: index)
         closing.removeFromSuperview()
         if index == activeTerminalIndex {
-            activeTerminalIndex = -1   // 무효값 — activateTerminal의 이전 뷰 제거를 건너뛰게
             activateTerminal(min(index, terminalSessions.count - 1))
         } else {
             if index < activeTerminalIndex { activeTerminalIndex -= 1 }
@@ -866,7 +919,7 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         guard terminalSessions.indices.contains(activeTerminalIndex) else { return }
         terminalSessions[activeTerminalIndex].removeFromSuperview()
         terminalSessions[activeTerminalIndex] = makeTerminalSession()   // 이전 참조 해제 → PTY SIGHUP
-        terminalSplit?.insertArrangedSubview(terminalSessions[activeTerminalIndex], at: 0)
+        mountTerminal(terminalSessions[activeTerminalIndex])
         updateVisibility()
     }
 
@@ -940,6 +993,8 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     func debugTerminalSync() {   // TF_TERMINAL_SYNC=1 — vi 실행 중 cd 버튼 = 새 탭 검증
         syncTerminalFolder()
     }
+
+    func debugAddTerminalTab() { newTerminalTab() }   // TF_TERMINAL_RESIZE=1 — 2탭+리사이즈 시 도움말 밴드 검증
 
     /// TF_TERMINAL_KEYSIM=<명령> — 합성 키 이벤트로 "실제 타이핑 → 감지" 경로 E2E 검증
     /// (postEvent → sendEvent → 로컬 모니터: 실입력과 동일 디스패치 경로)
