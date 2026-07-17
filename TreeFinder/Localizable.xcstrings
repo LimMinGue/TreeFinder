@@ -61,6 +61,26 @@
         }
       }
     },
+    "This archive is empty.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "빈 압축 파일입니다."
+          }
+        }
+      }
+    },
+    "and %d more": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "외 %d개 더"
+          }
+        }
+      }
+    },
     "About TreeFinder": {
       "localizations": {
         "ko": {

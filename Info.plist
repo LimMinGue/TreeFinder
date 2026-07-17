@@ -17,24 +17,24 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.1</string>
+	<string>0.1.2</string>
 	<key>CFBundleVersion</key>
-	<string>2</string>
+	<string>3</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>네트워크 보기에서 같은 네트워크의 컴퓨터와 NAS를 찾는 데 사용됩니다.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_smb._tcp</string>
 	</array>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
 	<key>NSDesktopFolderUsageDescription</key>
 	<string>TreeFinder shows the files in your Desktop folder. Nothing leaves this Mac.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
 	<string>TreeFinder shows the files in your Documents folder. Nothing leaves this Mac.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>TreeFinder shows the files in your Downloads folder. Nothing leaves this Mac.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>네트워크 보기에서 같은 네트워크의 컴퓨터와 NAS를 찾는 데 사용됩니다.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
 </dict>
 </plist>

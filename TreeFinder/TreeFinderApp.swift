@@ -230,6 +230,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     .splitViewItems.last?.viewController as? PreviewViewController)?.debugShowTerminal()
             }
         }
+        // TF_TERMINAL_RESIZE=1 → 터미널 2탭 생성 후 창 리사이즈 시 도움말 밴드가 화면을 덮지 않는지 검증(제작자 제보 2026-07-18)
+        if ProcessInfo.processInfo.environment["TF_TERMINAL_RESIZE"] == "1" {
+            let preview = { [weak wc] in
+                wc?.contentViewController?.children
+                    .compactMap { $0 as? NSSplitViewController }.first?
+                    .splitViewItems.last?.viewController as? PreviewViewController
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { preview()?.debugShowTerminal() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { preview()?.debugAddTerminalTab() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.3) {   // 리사이즈로 분할 재레이아웃 유발
+                guard let window = wc.window else { return }
+                var frame = window.frame
+                frame.size.height += 220; frame.origin.y -= 220
+                window.setFrame(frame, display: true, animate: false)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.3) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-termresize.png")
+            }
+        }
         // TF_OPEN_GETINFO=<경로> → 정보 가져오기 창을 열고 별도 스냅숏으로 검증
         if let infoPath = ProcessInfo.processInfo.environment["TF_OPEN_GETINFO"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {

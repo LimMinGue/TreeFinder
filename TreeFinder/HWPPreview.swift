@@ -66,6 +66,89 @@ enum HWPPreview {
     }
 }
 
+/// 압축파일 내부 파일 목록 (2026-07-18 제작자 지시) — /usr/bin/tar -tf(bsdtar/libarchive).
+/// zip·tar·tgz·bz2·xz·jar·apk 등 libarchive가 나열 가능한 포맷 전부. **표시 전용**(추출·실행 없음).
+/// 위원회 교차논쟁 반영: 스트리밍 읽기(바이트 상한)·타임아웃 킬러·stderr 미배수 데드락 차단·
+/// 손실 허용 디코딩·macOS 잡음 필터·제어/양방향 문자 무력화(RTL 확장자 위장 방지)·정렬.
+enum ArchiveListing {
+    private static let lineCap = 2000        // 표시 줄 상한 — NSTextView TextKit 레이아웃 비용 기준(성능 위원)
+    private static let byteCap = 4 << 20     // 읽기 바이트 상한 4MB — 압축폭탄·거대 gz 스트림 OOM 방어(성능·보안 위원)
+    private static let timeoutSeconds = 15.0 // 네트워크 볼륨 무한 행 방지(동시성 위원)
+
+    /// 백그라운드 큐에서 호출할 것. 실패(비아카이브·손상·단일 gz·미지원 포맷·상한 초과) 시 nil → 호출부 QL 폴백.
+    static func list(_ url: URL) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        process.arguments = ["-tf", url.path]              // 인자 고정 — 옵션 오인/주입 차단(보안 위원)
+        // GUI 앱은 로캘이 C라 tar가 비ASCII 파일명을 8진 이스케이프로 뭉갬 → UTF-8 강제(실측).
+        // 환경은 통째 교체가 아니라 병합 — PATH 보존(외부 디컴프레서 fork 대비, 보안·플랫폼 위원).
+        var env = ProcessInfo.processInfo.environment
+        env["LC_ALL"] = "en_US.UTF-8"
+        process.environment = env
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = FileHandle.nullDevice      // stderr 미배수 데드락 차단(Tester·성능 위원)
+        guard (try? process.run()) != nil else { return nil }
+
+        // 타임아웃 킬러는 블로킹 읽기 '이전에' 무장 — read가 안 풀리는 행에도 SIGTERM이 닿게(동시성 위원)
+        let killer = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds, execute: killer)
+
+        // 스트리밍 읽기 — byteCap 도달 시 tar 종료(전량 버퍼링 금지, 압축폭탄·거대 gz 방어)
+        let handle = out.fileHandleForReading
+        var data = Data()
+        while data.count < byteCap {
+            let chunk = handle.readData(ofLength: 65_536)
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
+        if process.isRunning { process.terminate() }        // 상한 초과분·미소진 스트림 정리
+        _ = try? handle.readToEnd()                          // 파이프 배수 후 종료 대기
+        process.waitUntilExit()
+        killer.cancel()
+
+        // gz(비-tar)·미지원 포맷·상한 초과(우리가 kill)는 모두 exit≠0 → 폴백. 정상 아카이브만 exit 0.
+        guard process.terminationStatus == 0 else { return nil }
+        // 손실 허용 UTF-8 디코딩 — 비UTF-8 이름 한 줄만 U+FFFD, 나머지 항목은 보존(QC 위원)
+        return format(String(decoding: data, as: UTF8.self))
+    }
+
+    private static func format(_ raw: String) -> String {
+        var entries: [String] = []
+        raw.enumerateLines { line, _ in
+            var name = line
+            if name.hasPrefix("./") { name.removeFirst(2) }  // tar -C . . 의 상대 접두 제거
+            guard !name.isEmpty, name != "." else { return }
+            // macOS zip 잡음(리소스 포크·메타) 제외 — 유령 항목·개수 부풀림 방지(QC 위원)
+            let base = ((name.hasSuffix("/") ? String(name.dropLast()) : name) as NSString).lastPathComponent
+            if name.hasPrefix("__MACOSX/") || base == ".DS_Store" || base.hasPrefix("._") { return }
+            entries.append(sanitized(name).precomposedStringWithCanonicalMapping)  // 정규화·무력화는 백그라운드에서
+        }
+        let total = entries.count
+        if total == 0 { return L("This archive is empty.") }
+        entries.sort { $0.localizedStandardCompare($1) == .orderedAscending }       // 형제 그룹화(앱 정체성)
+        var shown = entries
+        var truncated = false
+        if shown.count > lineCap { shown = Array(shown.prefix(lineCap)); truncated = true }
+        var text = String(format: L("%d items"), total) + "\n\n" + shown.joined(separator: "\n")
+        if truncated { text += "\n\n… " + String(format: L("and %d more"), total - lineCap) }
+        return text
+    }
+
+    /// 제어문자·양방향 서식문자 무력화 — RTL override(U+202E) 확장자 위장·가짜 행 삽입 방지(보안 위원)
+    private static func sanitized(_ name: String) -> String {
+        String(String.UnicodeScalarView(name.unicodeScalars.map { scalar in
+            switch scalar.value {
+            case 0x00...0x1F, 0x7F, 0x80...0x9F,                          // C0/C1 제어
+                 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069:        // 양방향 서식
+                return "\u{FFFD}"
+            default:
+                return scalar
+            }
+        }))
+    }
+}
+
 /// NSScrollView documentView용 수직 스택 — 페이지가 위에서부터 쌓이도록 (non-flipped 기본은 하단 기준)
 final class FlippedStackView: NSStackView {
     override var isFlipped: Bool { true }
