@@ -911,6 +911,7 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             split.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 1)   // 도움말 = 크기 유지(>250)
             terminalHelpPane.isHidden = true
             terminalTabBar.translatesAutoresizingMaskIntoConstraints = false
+            terminalTabBar.allowsClosingLastTab = true   // 세션 0개 = 미리보기로 복귀(유효 상태)
             terminalTabBar.onSelectTab = { [weak self] in self?.activateTerminal($0) }
             terminalTabBar.onCloseTab = { [weak self] in self?.confirmCloseTerminal($0) }
             terminalTabBar.onAddTab = { [weak self] in self?.newTerminalTab() }
@@ -1032,8 +1033,7 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
 
     /// 닫기 전 확인 — 실행 중 작업이 있을 수 있음 (제작자 지시 2026-07-17). 파괴 버튼은 기본값 아님(HIG)
     private func confirmCloseTerminal(_ index: Int) {
-        guard terminalSessions.count > 1, terminalSessions.indices.contains(index),
-              let window = view.window else { return }
+        guard terminalSessions.indices.contains(index), let window = view.window else { return }
         let title = terminalSessions[index].tabTitle(fallback: String(format: L("Terminal %d"), index + 1))
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -1047,11 +1047,20 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         }
     }
 
-    /// 탭 닫기 — 배열 제거 = 마지막 참조 해제 → PTY 종료(SIGHUP). 마지막 1개는 못 닫음(QC)
+    /// 탭 닫기 — 배열 제거 = 마지막 참조 해제 → PTY 종료(SIGHUP).
+    /// 마지막 1개도 닫을 수 있다(제작자 지시 2026-07-21): 세션 0개는 유효 상태로, 미리보기 탭으로 돌아가고
+    /// 다시 터미널 탭을 열 때 ensureTerminal이 새 셸을 만든다.
     private func closeTerminal(_ index: Int) {
-        guard terminalSessions.count > 1, terminalSessions.indices.contains(index) else { return }
+        guard terminalSessions.indices.contains(index) else { return }
         let closing = terminalSessions.remove(at: index)
         closing.removeFromSuperview()
+        if terminalSessions.isEmpty {
+            activeTerminalIndex = 0
+            refreshTerminalTabBar()
+            tabs.selectedSegment = 0
+            tabChanged()
+            return
+        }
         if index == activeTerminalIndex {
             activateTerminal(min(index, terminalSessions.count - 1))
         } else {
@@ -1379,5 +1388,13 @@ extension PreviewViewController: LocalProcessTerminalViewDelegate {
         return label(host) == label(ProcessInfo.processInfo.hostName)
     }
 
-    func processTerminated(source: TerminalView, exitCode: Int32?) {}
+    /// 셸이 끝나면(`exit`·`logout`·크래시) 탭도 함께 닫는다 (제작자 제보 2026-07-21 — 죽은 탭이 남던 문제).
+    /// 확인 시트는 없다: 사용자가 스스로 끝낸 세션이라 물어볼 게 없다.
+    /// 이미 배열에서 빠진 세션(닫기·셸 재시작으로 교체된 뷰)의 뒤늦은 통지는 인덱스 조회에서 걸러진다.
+    /// SwiftTerm의 LocalProcess는 기본 dispatchQueue가 메인이라 UI를 여기서 바로 만져도 안전.
+    func processTerminated(source: TerminalView, exitCode: Int32?) {
+        guard let terminal = source as? DropTerminalView,
+              let index = terminalSessions.firstIndex(where: { $0 === terminal }) else { return }
+        closeTerminal(index)
+    }
 }
