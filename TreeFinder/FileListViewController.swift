@@ -253,6 +253,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     var onSelect: ((FileItem?) -> Void)?
+    /// .sh 실행 요청 — 미리보기 패널의 새 터미널 탭으로 라우팅 (제작자 지시 2026-07-21)
+    var onRunScript: ((URL) -> Void)?
     var onAddFavorite: ((URL) -> Void)?
     /// 듀얼 페인 — 사용자 상호작용 시 이 페인을 활성으로 승격 (워게임 dual_pane §4)
     var onActivate: (() -> Void)?
@@ -638,6 +640,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     #if DEBUG
+    func debugRunScript(_ url: URL) { openFile(url) }   // TF_RUN_SCRIPT — .sh 더블클릭과 동일 경로
+
     func debugSelectFirstItem() {   // TF_VIEW_STYLE 스냅숏 검증용 — 선택 시각/갤러리 미리보기 확인
         guard !items.isEmpty else { return }
         setActiveSelection(IndexSet(integer: 0), scrollToFirst: true)
@@ -1238,7 +1242,16 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             show(directory: only.url)
             return
         }
-        for item in selected where !item.isDirectory { NSWorkspace.shared.open(item.url) }
+        for item in selected where !item.isDirectory { openFile(item.url) }
+    }
+
+    /// 파일 열기 단일 경로(더블클릭·⌘O 공용) — .sh는 앱 연결 대신 우측 터미널 패널에서 실행 (제작자 지시 2026-07-21)
+    private func openFile(_ url: URL) {
+        if url.pathExtension.lowercased() == "sh", let onRunScript {
+            onRunScript(url)
+        } else {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     /// ⌘W — 활성 탭 닫기. 마지막 탭이면 false 반환(호출자가 창을 닫음)
@@ -1366,7 +1379,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         if item.isDirectory {
             show(directory: item.url)
         } else {
-            NSWorkspace.shared.open(item.url)
+            openFile(item.url)
         }
     }
 

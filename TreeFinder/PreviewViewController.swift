@@ -9,21 +9,39 @@ final class DropTerminalView: LocalProcessTerminalView {
     var onDropFiles: (([URL]) -> Void)?
     /// Enter로 제출된 입력 줄 — 명령 도움말 밴드 트리거 (제작자 지시 2026-07-16)
     var onCommandSubmit: ((String) -> Void)?
+    /// 이 터미널이 포커스일 때의 키 입력 — Broadcast input 중계용 (제작자 지시 2026-07-21)
+    var onKeyInput: ((NSEvent) -> Void)?
     private var inputLine = ""
     private var keyMonitor: Any?
 
-    // 탭 제목 소스 — 우선순위: 사용자 지정 > OSC 제목 > OSC7 경로 > 마지막 명령 > "터미널 N"
-    // (iTerm2식 자동 제목 + 더블클릭 수동 이름, 세션 한정 휘발 — 제작자 지시 2026-07-17)
+    // 탭 제목 소스 — 우선순위: 사용자 지정 > 원격 접속 정보 > 현재 경로 > OSC 제목 > 마지막 명령 > "터미널 N"
+    // (원격은 서버 정보, 로컬은 경로 — 제작자 지시 2026-07-21. 수동 이름은 세션 한정 휘발)
     var userTitle: String?
     var oscTitle: String?
-    var cwdName: String?
+    var cwdPath: String?
+    var remoteTarget: String?
     var lastCommand: String?
 
     func tabTitle(fallback: String) -> String {
-        for candidate in [userTitle, oscTitle, cwdName, lastCommand] {
+        for candidate in [userTitle, remoteTarget, cwdPath, oscTitle, lastCommand] {
             if let candidate, !candidate.isEmpty { return candidate }
         }
         return fallback
+    }
+
+    /// ssh/mosh 접속 대상 추출 — "ssh -p 2222 me@host" → "me@host". 값을 갖는 옵션은 건너뛴다.
+    static func remoteTarget(inCommandLine line: String) -> String? {
+        var tokens = line.split(separator: " ").map(String.init)
+        if tokens.first == "sudo" { tokens.removeFirst() }
+        guard let first = tokens.first,
+              ["ssh", "mosh"].contains((first as NSString).lastPathComponent) else { return nil }
+        let takesValue: Set<String> = ["-p", "-i", "-l", "-o", "-J", "-L", "-R", "-D", "-b", "-c", "-F", "-W"]
+        var index = 1
+        while index < tokens.count {
+            let token = tokens[index]
+            if takesValue.contains(token) { index += 2 } else if token.hasPrefix("-") { index += 1 } else { return token }
+        }
+        return nil
     }
 
     override init(frame: CGRect) {
@@ -43,6 +61,7 @@ final class DropTerminalView: LocalProcessTerminalView {
                    let responder = self.window?.firstResponder,
                    responder === self || (responder as? NSView)?.isDescendant(of: self) == true {
                     self.trackInput(event)
+                    self.onKeyInput?(event)
                 }
                 return event
             }
@@ -73,6 +92,18 @@ final class DropTerminalView: LocalProcessTerminalView {
     }
 
     required init?(coder: NSCoder) { fatalError("코드 전용 생성") }
+
+    #if DEBUG
+    static func selfTest() {
+        assert(remoteTarget(inCommandLine: "ssh me@host") == "me@host", "기본 ssh 대상 파싱")
+        assert(remoteTarget(inCommandLine: "ssh -p 2222 -i ~/k me@host ls") == "me@host", "값 옵션 건너뛰기")
+        assert(remoteTarget(inCommandLine: "sudo /usr/bin/ssh -4 host") == "host", "sudo·절대경로·플래그")
+        assert(remoteTarget(inCommandLine: "ls -la") == nil, "ssh가 아닌 명령")
+        assert(remoteTarget(inCommandLine: "ssh -p 22") == nil, "대상 없는 ssh")
+        assert(TerminalTheme.all.allSatisfy { $0.ansi.count == 16 }, "테마 팔레트는 16색이어야 installColors가 적용됨")
+        assert(TerminalTheme.all.map(\.id).count == Set(TerminalTheme.all.map(\.id)).count, "테마 id 중복")
+    }
+    #endif
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         #if DEBUG
@@ -161,6 +192,17 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
                                       image: NSImage(systemSymbolName: "folder.badge.gearshape",
                                                      accessibilityDescription: nil)!,
                                       target: nil, action: #selector(syncTerminalFolder))
+    // 동기화 버튼 옆 토글 2종 — 입력 브로드캐스트·도움말 밴드 (제작자 지시 2026-07-21)
+    private let broadcastButton = NSButton(image: NSImage(systemSymbolName: "dot.radiowaves.left.and.right",
+                                                          accessibilityDescription: nil)!,
+                                           target: nil, action: #selector(toggleBroadcast))
+    private let helpToggleButton = NSButton(image: NSImage(systemSymbolName: "questionmark.circle",
+                                                           accessibilityDescription: nil)!,
+                                            target: nil, action: #selector(toggleTerminalHelp))
+    /// 켜면 활성 터미널에 친 키가 열려 있는 모든 세션으로 동시에 나간다
+    private var broadcastInput = false
+    /// 도움말 밴드 표시 여부 — 끄면 명령을 실행해도 다시 열리지 않는다
+    private var helpVisible = true
     // 터미널 다중 세션(탭) — "현재 폴더로 이동"은 항상 새 탭 (제작자 확정 2026-07-16, decisions §6)
     private var terminalSessions: [DropTerminalView] = []
     private var activeTerminalIndex = 0
@@ -243,6 +285,20 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         syncButton.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(syncButton)
 
+        // 토글 2종 — 눌린 상태가 보이게 pushOnPushOff. 도움말은 기본 켜짐(기존 동작 유지)
+        for (button, tooltip) in [(broadcastButton, L("Broadcast Input")),
+                                  (helpToggleButton, L("Show/Hide Command Help"))] {
+            button.target = self
+            button.setButtonType(.pushOnPushOff)
+            button.bezelStyle = .accessoryBar
+            button.toolTip = tooltip
+            button.setAccessibilityLabel(tooltip)
+            button.isHidden = true
+            button.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(button)
+        }
+        setToggle(helpToggleButton, on: helpVisible)
+
         // 마크다운 저장 버튼 — 동기화 버튼과 같은 자리(터미널/마크다운은 동시 노출 없음), 변경 시에만
         mdSaveButton.target = self
         mdSaveButton.title = L("Save")
@@ -324,6 +380,10 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
 
             syncButton.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),   // 스위치와 같은 선상
             syncButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            broadcastButton.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),
+            broadcastButton.trailingAnchor.constraint(equalTo: syncButton.leadingAnchor, constant: -6),
+            helpToggleButton.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),
+            helpToggleButton.trailingAnchor.constraint(equalTo: broadcastButton.leadingAnchor, constant: -6),
             mdSaveButton.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),
             mdSaveButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
 
@@ -477,6 +537,16 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
 
     private static func isMarkdown(_ url: URL) -> Bool {
         ["md", "markdown", "mdown"].contains(url.pathExtension.lowercased())
+    }
+
+    /// 파일 목록에서 선택이 바뀐 경로 — 터미널 탭에 있어도 미리보기로 자동 전환 (제작자 지시 2026-07-21).
+    /// 선택 해제(nil)는 전환하지 않는다: 폴더 이동·FSEvents 리로드가 터미널 작업을 가로채지 않게.
+    func showFromSelection(_ url: URL?) {
+        if url != nil, tabs.selectedSegment != 0 {
+            tabs.selectedSegment = 0
+            tabChanged()
+        }
+        show(url)
     }
 
     func show(_ url: URL?) {
@@ -867,7 +937,7 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         if !observingSettings {
             observingSettings = true
             NotificationCenter.default.addObserver(forName: .settingsChanged, object: nil, queue: .main) {
-                [weak self] _ in self?.applyTerminalFont()
+                [weak self] _ in self?.applyTerminalSettings()
             }
         }
     }
@@ -881,8 +951,13 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         }
         terminal.onCommandSubmit = { [weak self, weak terminal] line in
             terminal?.lastCommand = line   // 탭 제목 폴백 소스 (iTerm2식)
+            // ssh/mosh = 원격 접속 — 탭 제목을 서버 정보로. 복귀 판정은 OSC7 호스트가 담당(§탭 제목)
+            if let target = DropTerminalView.remoteTarget(inCommandLine: line) { terminal?.remoteTarget = target }
             self?.updateTerminalHelp(for: line)
             self?.refreshTerminalTabBar()
+        }
+        terminal.onKeyInput = { [weak self, weak terminal] event in
+            self?.broadcast(event, from: terminal)
         }
         terminal.processDelegate = self   // OSC 제목·OSC7 경로 → 탭 제목 자동화
         terminal.translatesAutoresizingMaskIntoConstraints = false
@@ -891,7 +966,29 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         terminal.startProcess(executable: shell, execName: "-\(shellName)")   // 로그인 셸
         terminal.menu = buildTerminalMenu(for: terminal)
         applyTerminalFont(to: terminal)
+        TerminalTheme.current.apply(to: terminal)
         return terminal
+    }
+
+    /// Broadcast input — 활성 세션에 친 키를 나머지 세션에도 그대로 (제작자 지시 2026-07-21).
+    /// ponytail: 문자를 만드는 키만 중계 — ⌘단축키(붙여넣기 등)와 방향키·F키(0xF700 사설 영역)는 제외.
+    /// 히스토리(↑)·붙여넣기로 만든 입력은 중계되지 않는다(오탐보다 안전 — trackInput과 같은 규약).
+    private func broadcast(_ event: NSEvent, from source: DropTerminalView?) {
+        guard broadcastInput, !event.modifierFlags.contains(.command),
+              let characters = event.characters, let first = characters.unicodeScalars.first,
+              !(0xF700...0xF8FF).contains(first.value) else { return }
+        for session in terminalSessions where session !== source { session.send(txt: characters) }
+    }
+
+    @objc private func toggleBroadcast() {
+        broadcastInput.toggle()
+        setToggle(broadcastButton, on: broadcastInput)
+    }
+
+    /// 토글 버튼 켜짐 표시 — 눌린 상태 + 강조색 틴트(밴드가 작아 상태가 잘 안 보인다는 대비)
+    private func setToggle(_ button: NSButton, on: Bool) {
+        button.state = on ? .on : .off
+        button.contentTintColor = on ? .controlAccentColor : nil
     }
 
     /// 탭 전환 — 비활성 세션은 호스트에서 떼어내되 배열이 참조 유지(PTY 생존, 파일 탭과 같은 규약)
@@ -918,11 +1015,11 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         ])
     }
 
-    /// 호스트 배경 = 터미널 셀 배경(검정) — 여백이 패딩처럼 보이게. SwiftTerm은 셀을 Color.defaultBackground(0,0,0)로
-    /// 그리는데 뷰 nativeBackgroundColor는 textBackgroundColor(라이트=흰색)라, 흰 여백이 검은 터미널을 두르는 불일치가 생김.
-    /// TreeFinder는 터미널 색을 테마링하지 않으므로 검정으로 고정. ponytail: 터미널 테마 도입 시 getTerminal().backgroundColor 추적으로 승격.
+    /// 호스트 배경 = 선택한 테마의 배경색 — 세션 둘레 여백이 패딩처럼 보이게.
+    /// (SwiftTerm의 기본 nativeBackgroundColor는 textBackgroundColor라 라이트 모드에서 흰 테두리가 생기던 문제 —
+    ///  이제 테마가 배경을 명시하므로 양쪽을 같은 값으로 맞춘다.)
     private func refreshTerminalHostBackground() {
-        terminalHost.layer?.backgroundColor = NSColor.black.cgColor
+        terminalHost.layer?.backgroundColor = TerminalTheme.current.backgroundColor.cgColor
     }
 
     private func newTerminalTab() {
@@ -1035,9 +1132,14 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         updateVisibility()
     }
 
-    /// 터미널 폰트는 특성을 탐(파워라인 글리프 등) — Settings에서 지정 (제작자 지시 2026-07-16)
-    private func applyTerminalFont() {
-        terminalSessions.forEach { applyTerminalFont(to: $0) }   // 설정 변경 = 전 세션 반영
+    /// 설정 변경(폰트·테마) 반영 — 전 세션 + 여백 배경까지 한 번에
+    private func applyTerminalSettings() {
+        let theme = TerminalTheme.current
+        terminalSessions.forEach {
+            applyTerminalFont(to: $0)
+            theme.apply(to: $0)
+        }
+        refreshTerminalHostBackground()
     }
 
     private func applyTerminalFont(to terminal: LocalProcessTerminalView) {
@@ -1057,11 +1159,32 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     /// 문서 오염 원천 차단 (제작자 확정 2026-07-17, 기존 "활성 셸에 cd 전송"은 vi 입력 모드 오염 실측으로 폐기)
     @objc private func syncTerminalFolder() {
         guard let directory = currentDirectory else { return }
+        openTerminalTab(running: "cd \(Self.shellQuoted(directory.path))")
+    }
+
+    /// 셸 스크립트 더블클릭 = 새 터미널 탭에서 실행 (제작자 지시 2026-07-21).
+    /// 실행 권한이 없으면 `sh 경로`로 — 권한 때문에 아무 일도 안 일어나는 것처럼 보이는 것 방지.
+    /// 스크립트가 끝나도 셸은 남아 출력을 확인할 수 있다.
+    func runScript(_ url: URL) {
+        let quoted = Self.shellQuoted(url.path)
+        let command = FileManager.default.isExecutableFile(atPath: url.path) ? quoted : "sh \(quoted)"
+        openTerminalTab(running: "cd \(Self.shellQuoted(url.deletingLastPathComponent().path)) && \(command)",
+                        title: url.lastPathComponent)
+    }
+
+    /// 새 터미널 탭을 열고 명령 한 줄을 보낸다 — "현재 폴더로 이동"·스크립트 실행 공용 경로.
+    /// 새 셸이 프롬프트 전이라도 PTY 입력 버퍼가 보관 — 셸 초기화 후 실행됨.
+    private func openTerminalTab(running command: String, title: String? = nil) {
+        if tabs.selectedSegment != 1 {
+            tabs.selectedSegment = 1
+            tabChanged()
+        }
         ensureTerminal()
-        terminalSessions.append(makeTerminalSession())
+        let session = makeTerminalSession()
+        session.userTitle = title
+        terminalSessions.append(session)
         activateTerminal(terminalSessions.count - 1)
-        // 새 셸이 프롬프트 전이라도 PTY 입력 버퍼가 보관 — 셸 초기화 후 cd 실행됨
-        terminalView?.send(txt: "cd \(Self.shellQuoted(directory.path))\n")
+        session.send(txt: command + "\n")
     }
 
     /// 명령 도움말 밴드 — 터미널 열릴 때부터 표시(기본 안내), 아는 명령 실행 시 해당 치트시트로 교체.
@@ -1069,10 +1192,21 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     private func showTerminalHelp(_ entry: TerminalHelp.Entry) {
         terminalHelpText.textStorage?.setAttributedString(TerminalHelp.render(entry))
         terminalHelpText.scrollToBeginningOfDocument(nil)
-        guard terminalHelpPane.isHidden, let split = terminalSplit else { return }
+        guard helpVisible, terminalHelpPane.isHidden, let split = terminalSplit else { return }
         terminalHelpPane.isHidden = false
         split.layoutSubtreeIfNeeded()
         split.setPosition(split.bounds.height * 0.85, ofDividerAt: 0)   // 기본 = 하단 15%
+    }
+
+    /// 도움말 밴드 껐다 켜기 — 끈 상태에선 명령을 실행해도 밴드가 다시 열리지 않는다 (제작자 지시 2026-07-21)
+    @objc private func toggleTerminalHelp() {
+        helpVisible.toggle()
+        setToggle(helpToggleButton, on: helpVisible)
+        guard let split = terminalSplit else { return }
+        terminalHelpPane.isHidden = !helpVisible
+        guard helpVisible else { return }
+        split.layoutSubtreeIfNeeded()
+        split.setPosition(split.bounds.height * 0.85, ofDividerAt: 0)
     }
 
     private func updateTerminalHelp(for line: String) {
@@ -1107,6 +1241,15 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     }
 
     func debugAddTerminalTab() { newTerminalTab() }   // TF_TERMINAL_RESIZE=1 — 2탭+리사이즈 시 도움말 밴드 검증
+
+    /// TF_TERMINAL_BROADCAST=<명령> — 탭 2개 + 브로드캐스트 켬 → 양쪽 세션에 같은 입력이 나가는지 검증
+    func debugBroadcastKeySim(_ text: String) {
+        newTerminalTab()
+        toggleBroadcast()
+        debugTerminalKeySim(text)
+    }
+
+    func debugToggleTerminalHelp() { toggleTerminalHelp() }   // TF_TERMINAL_HELP_OFF=1 — 도움말 밴드 끄기 검증
 
     func debugSortArchive(_ key: String) {   // TF_ARCHIVE_SORT=size — 크기 정렬 헤더 클릭 검증(내림차순)
         archiveTable.sortDescriptors = [NSSortDescriptor(key: key, ascending: false)]
@@ -1143,6 +1286,8 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         let terminal = (tabs.selectedSegment == 1)
         terminalContainer.isHidden = !terminal
         syncButton.isHidden = !terminal   // 터미널 탭에서만 노출
+        broadcastButton.isHidden = !terminal
+        helpToggleButton.isHidden = !terminal
         previewView.isHidden = terminal || currentURL == nil || infoOnlyMode
             || customPreviewActive || markdownActive
         let customActive = !terminal && !infoOnlyMode && customPreviewActive && currentURL != nil
@@ -1213,12 +1358,22 @@ extension PreviewViewController: LocalProcessTerminalViewDelegate {
         refreshTerminalTabBar()
     }
 
+    /// OSC7 — 로컬 탭 제목의 소스(현재 경로) 겸 원격 세션 종료 신호.
+    /// OSC7은 `file://호스트/경로` 형태라 호스트가 이 맥이면 ssh에서 빠져나온 것 → 서버 제목 해제.
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
         guard let terminal = source as? DropTerminalView else { return }
         if let directory, let url = URL(string: directory), url.isFileURL {
-            terminal.cwdName = FileManager.default.displayName(atPath: url.path)
+            terminal.cwdPath = (url.path as NSString).abbreviatingWithTildeInPath
+            if Self.isThisMac(url.host) { terminal.remoteTarget = nil }
         }
         refreshTerminalTabBar()
+    }
+
+    /// 호스트 이름 비교는 첫 라벨만 — 셸은 짧은 이름(`mac`), ProcessInfo는 `mac.local`을 주는 일이 흔하다.
+    private static func isThisMac(_ host: String?) -> Bool {
+        guard let host, !host.isEmpty, host != "localhost" else { return true }
+        func label(_ name: String) -> String { name.split(separator: ".").first?.lowercased() ?? "" }
+        return label(host) == label(ProcessInfo.processInfo.hostName)
     }
 
     func processTerminated(source: TerminalView, exitCode: Int32?) {}
