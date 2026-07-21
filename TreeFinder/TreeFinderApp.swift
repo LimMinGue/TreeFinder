@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         #if DEBUG
         DirectoryLister.selfTest()
         SizeService.selfTest()
+        DropTerminalView.selfTest()
         #endif
         buildMainMenu()
         var startDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -247,6 +248,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.3) {
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-termresize.png")
+            }
+        }
+        // TF_SELECT_TO_PREVIEW=1 → (TF_TERMINAL_TAB과 병용) 터미널 탭에 있어도 파일 선택 시 미리보기로
+        // 자동 전환되는지 검증 (+3.5s 스냅숏). debugSetViewStyle이 0.4s 뒤 첫 항목을 선택한다.
+        if ProcessInfo.processInfo.environment["TF_SELECT_TO_PREVIEW"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { wc.debugSetViewStyle("list") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-selectpreview.png")
+            }
+        }
+        // TF_RUN_SCRIPT=<경로> → .sh 더블클릭 경로(목록 → 새 터미널 탭 실행) E2E 검증 (+4s 스냅숏)
+        if let scriptPath = ProcessInfo.processInfo.environment["TF_RUN_SCRIPT"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { wc.debugRunScript(scriptPath) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-runscript.png")
+            }
+        }
+        // TF_TERMINAL_BROADCAST=<명령> → 탭 2개 + 브로드캐스트로 같은 입력이 양쪽에 나가는지 검증 (+5s 스냅숏)
+        // TF_TERMINAL_HELP_OFF=1 과 병용하면 도움말 밴드 끈 상태도 같은 스냅숏에 담긴다
+        if let simCommand = ProcessInfo.processInfo.environment["TF_TERMINAL_BROADCAST"] {
+            let preview = { [weak wc] in
+                wc?.contentViewController?.children
+                    .compactMap { $0 as? NSSplitViewController }.first?
+                    .splitViewItems.last?.viewController as? PreviewViewController
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { preview()?.debugShowTerminal() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { preview()?.debugBroadcastKeySim(simCommand) }
+            if ProcessInfo.processInfo.environment["TF_TERMINAL_HELP_OFF"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { preview()?.debugToggleTerminalHelp() }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-broadcast.png")
             }
         }
         // TF_ARCHIVE_SORT=<키> → (TF_PREVIEW_FILE과 병용) 압축 표를 해당 컬럼으로 정렬(헤더 클릭 검증)

@@ -6,6 +6,7 @@ enum SettingsKeys {
     static let terminalApp = "TerminalAppPath"
     static let terminalFontName = "TerminalFontName"
     static let terminalFontSize = "TerminalFontSize"
+    static let terminalTheme = "TerminalTheme"
     static let alwaysExtensions = "AlwaysShowExtensions"
     static let showHidden = "ShowHiddenFiles"
     static let expandToOpenFolder = "ExpandToOpenFolder"
@@ -27,6 +28,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.terminalApp) private var terminalApp = SettingsKeys.defaultTerminal
     @AppStorage(SettingsKeys.terminalFontName) private var terminalFontName = "Menlo"
     @AppStorage(SettingsKeys.terminalFontSize) private var terminalFontSize = 12.0
+    @AppStorage(SettingsKeys.terminalTheme) private var terminalTheme = TerminalTheme.all[0].id
 
     /// 고정폭 폰트 패밀리 (파워라인/Nerd Font 포함 — 설치된 것만)
     private let monoFamilies: [String] = {
@@ -74,8 +76,11 @@ struct SettingsView: View {
                     ForEach(monoFamilies, id: \.self) { Text($0).tag($0) }
                 }
                 Stepper("Font size: \(Int(terminalFontSize)) pt", value: $terminalFontSize, in: 9...24)
+                Picker("Terminal theme", selection: $terminalTheme) {
+                    ForEach(TerminalTheme.all, id: \.id) { Text(LocalizedStringKey($0.name)).tag($0.id) }
+                }
             } header: { Text("Terminal") } footer: {
-                Text("Used by the \"Open in Terminal\" command. The embedded Terminal tab always runs your login shell. Pick a Nerd Font if your prompt uses powerline glyphs.")
+                Text("Used by the \"Open in Terminal\" command. The embedded Terminal tab always runs your login shell. Pick a Nerd Font if your prompt uses powerline glyphs. The theme applies to the embedded Terminal tab only.")
             }
 
             Section {
@@ -98,5 +103,6 @@ struct SettingsView: View {
         .onChange(of: alwaysExtensions) { NotificationCenter.default.post(name: .settingsChanged, object: nil) }
         .onChange(of: terminalFontName) { NotificationCenter.default.post(name: .settingsChanged, object: nil) }
         .onChange(of: terminalFontSize) { NotificationCenter.default.post(name: .settingsChanged, object: nil) }
+        .onChange(of: terminalTheme) { NotificationCenter.default.post(name: .settingsChanged, object: nil) }
     }
 }

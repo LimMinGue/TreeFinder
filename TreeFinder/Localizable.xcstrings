@@ -61,26 +61,6 @@
         }
       }
     },
-    "This archive is empty.": {
-      "localizations": {
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "빈 압축 파일입니다."
-          }
-        }
-      }
-    },
-    "and %d more": {
-      "localizations": {
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "외 %d개 더"
-          }
-        }
-      }
-    },
     "About TreeFinder": {
       "localizations": {
         "ko": {
@@ -187,6 +167,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "뒤로"
+          }
+        }
+      }
+    },
+    "Broadcast Input": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "입력 브로드캐스트 — 열린 모든 터미널에 같은 입력 전송"
           }
         }
       }
@@ -511,6 +501,16 @@
         }
       }
     },
+    "Default": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기본"
+          }
+        }
+      }
+    },
     "Dimensions": {
       "localizations": {
         "ko": {
@@ -537,6 +537,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "%@의 변경 사항을 저장하시겠습니까?"
+          }
+        }
+      }
+    },
+    "Dracula": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dracula"
           }
         }
       }
@@ -1101,6 +1111,16 @@
         }
       }
     },
+    "Nord": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nord"
+          }
+        }
+      }
+    },
     "Open": {
       "localizations": {
         "ko": {
@@ -1541,6 +1561,16 @@
         }
       }
     },
+    "Show/Hide Command Help": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "명령 도움말 보이기/숨기기"
+          }
+        }
+      }
+    },
     "Show/Hide Preview": {
       "localizations": {
         "ko": {
@@ -1567,6 +1597,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "크기"
+          }
+        }
+      }
+    },
+    "Solarized Dark": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Solarized 다크"
+          }
+        }
+      }
+    },
+    "Solarized Light": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Solarized 라이트"
           }
         }
       }
@@ -1621,12 +1671,32 @@
         }
       }
     },
+    "Terminal theme": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "터미널 테마"
+          }
+        }
+      }
+    },
     "The folder can't be found.": {
       "localizations": {
         "ko": {
           "stringUnit": {
             "state": "translated",
             "value": "폴더를 찾을 수 없습니다."
+          }
+        }
+      }
+    },
+    "This archive is empty.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "빈 압축 파일입니다."
           }
         }
       }
@@ -1671,12 +1741,12 @@
         }
       }
     },
-    "Used by the \"Open in Terminal\" command. The embedded Terminal tab always runs your login shell. Pick a Nerd Font if your prompt uses powerline glyphs.": {
+    "Used by the \"Open in Terminal\" command. The embedded Terminal tab always runs your login shell. Pick a Nerd Font if your prompt uses powerline glyphs. The theme applies to the embedded Terminal tab only.": {
       "localizations": {
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "\"터미널에서 열기\" 명령이 사용할 앱입니다. 내장 터미널 탭은 항상 로그인 셸을 실행합니다. 프롬프트가 파워라인 글리프를 쓰면 Nerd Font를 선택하세요."
+            "value": "\"터미널에서 열기\" 명령이 사용합니다. 내장 터미널 탭은 항상 로그인 셸을 실행합니다. 프롬프트에 파워라인 글리프를 쓴다면 Nerd Font를 고르세요. 테마는 내장 터미널 탭에만 적용됩니다."
           }
         }
       }
@@ -1777,6 +1847,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "축소"
+          }
+        }
+      }
+    },
+    "and %d more": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "외 %d개 더"
           }
         }
       }

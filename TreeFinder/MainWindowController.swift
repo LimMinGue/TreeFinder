@@ -354,6 +354,10 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         listController?.show(directory: FileListViewController.networkURL)
     }
 
+    func debugRunScript(_ path: String) {   // TF_RUN_SCRIPT — 목록 → onRunScript → 새 터미널 탭 전 경로
+        listController?.debugRunScript(URL(fileURLWithPath: path))
+    }
+
     func debugFitColumns() {   // TF_FIT_COLUMNS 스냅숏 검증용
         listController?.debugFitColumns()
     }
@@ -381,11 +385,16 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
             self.activate(pane: list)
         }
         list.onAddFavorite = { [weak self] url in self?.treeController?.addFavorite(url: url) }
+        // .sh 더블클릭 = 우측 패널의 새 터미널 탭에서 실행 — 패널이 접혀 있으면 먼저 편다
+        list.onRunScript = { [weak self] url in
+            self?.splitController?.splitViewItems.last?.isCollapsed = false
+            self?.previewController?.runScript(url)
+        }
         list.onSelect = { [weak self, weak list] item in
             guard let self, let list, list === self.listController else { return }
             // 네트워크 컴퓨터 등 비파일 URL은 미리보기·경로 바 대상 아님 (워게임 network_browse)
             let fileURL = (item?.url.isFileURL == true) ? item?.url : nil
-            self.previewController?.show(fileURL)
+            self.previewController?.showFromSelection(fileURL)   // 터미널 탭이어도 미리보기로 전환 (§파일 목록)
             let directoryURL = (list.directory?.isFileURL == true) ? list.directory : nil
             self.contentController?.pathBar.show(fileURL ?? directoryURL)   // 선택 없으면 현재 폴더 (§9)
         }
