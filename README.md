@@ -112,6 +112,15 @@ ditto build/dd/Build/Products/Release/TreeFinder.app /Applications/TreeFinder.ap
 open /Applications/TreeFinder.app
 ```
 
+위 과정을 한 번에 하려면 저장소의 `build.sh`를 쓰세요:
+
+```bash
+./build.sh          # Release 빌드
+./build.sh -d       # Debug 빌드
+./build.sh -i -r    # 빌드 → /Applications 설치 → 실행
+./build.sh -h       # 옵션 도움말
+```
+
 > `DEVELOPER_DIR=…` 접두는 `xcode-select`가 Command Line Tools를 가리키는 환경 대비입니다
 > (`xcodebuild … requires Xcode` 오류 방지). Xcode가 이미 선택돼 있어도 무해합니다.
 > 영구 전환을 원하면: `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`
