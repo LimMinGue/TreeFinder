@@ -128,6 +128,9 @@ final class TabBarView: NSView {
     var onCloseTab: ((Int) -> Void)?
     var onAddTab: (() -> Void)?
     var onDropOnTab: ((Int, [URL], Bool) -> Void)?
+    /// 마지막 남은 탭도 ✕로 닫을 수 있는지. 파일 목록은 폴더가 항상 하나 떠 있어야 해서 기본 false
+    /// (마지막 탭 닫기 = ⌘W로 창 닫기). 터미널은 0개 상태가 유효해 true (제작자 지시 2026-07-21)
+    var allowsClosingLastTab = false
     var showsActiveAccent = false {
         didSet { needsDisplay = true }
     }
@@ -180,7 +183,7 @@ final class TabBarView: NSView {
         for (index, item) in items.enumerated() {
             let tab = TabItemView(
                 index: index, icon: item.icon, title: item.title, active: index == active,
-                closable: items.count > 1,   // 마지막 1개는 ✕ 숨김 (QC)
+                closable: allowsClosingLastTab || items.count > 1,
                 onSelect: { [weak self] in self?.onSelectTab?($0) },
                 onClose: { [weak self] in self?.onCloseTab?($0) },
                 onDropFiles: { [weak self] in self?.onDropOnTab?($0, $1, $2) })

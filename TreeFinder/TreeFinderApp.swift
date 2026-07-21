@@ -250,6 +250,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-termresize.png")
             }
         }
+        // TF_TERMINAL_CLOSE_REOPEN=1 → exit로 마지막 탭까지 닫히는지(+미리보기 복귀) → 다시 터미널 탭을
+        // 열면 새 셸이 생기는지 검증. 스냅숏 2장(/tmp/treefinder-closed.png · treefinder-reopen.png)
+        if ProcessInfo.processInfo.environment["TF_TERMINAL_CLOSE_REOPEN"] == "1" {
+            let preview = { [weak wc] in
+                wc?.contentViewController?.children
+                    .compactMap { $0 as? NSSplitViewController }.first?
+                    .splitViewItems.last?.viewController as? PreviewViewController
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { preview()?.debugShowTerminal() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { preview()?.debugTerminalKeySim("exit") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-closed.png")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) { preview()?.debugShowTerminal() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-reopen.png")
+            }
+        }
         // TF_SELECT_TO_PREVIEW=1 → (TF_TERMINAL_TAB과 병용) 터미널 탭에 있어도 파일 선택 시 미리보기로
         // 자동 전환되는지 검증 (+3.5s 스냅숏). debugSetViewStyle이 0.4s 뒤 첫 항목을 선택한다.
         if ProcessInfo.processInfo.environment["TF_SELECT_TO_PREVIEW"] == "1" {
