@@ -963,7 +963,10 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         terminal.translatesAutoresizingMaskIntoConstraints = false
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let shellName = (shell as NSString).lastPathComponent
-        terminal.startProcess(executable: shell, execName: "-\(shellName)")   // 로그인 셸
+        // 로그인 셸 + 시작 위치는 항상 홈 (제작자 지시 2026-07-21).
+        // 지정하지 않으면 앱 프로세스의 cwd(Finder 실행 시 "/")를 물려받아 세션마다 위치가 달라짐.
+        terminal.startProcess(executable: shell, execName: "-\(shellName)",
+                              currentDirectory: FileManager.default.homeDirectoryForCurrentUser.path)
         terminal.menu = buildTerminalMenu(for: terminal)
         applyTerminalFont(to: terminal)
         TerminalTheme.current.apply(to: terminal)
