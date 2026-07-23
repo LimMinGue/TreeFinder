@@ -351,6 +351,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 NSLog("Settings window frame: %@", NSStringFromRect(window.frame))
             }
         }
+        // TF_SEARCH=<검색어> → (TF_START_DIR 병용) 재귀 파일명 검색 결과·위치 표시를 스냅숏으로 검증 (제작자 지시 2026-07-23)
+        if let query = ProcessInfo.processInfo.environment["TF_SEARCH"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { wc.debugSearch(query) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-search.png")
+            }
+        }
+        // TF_TREE_REFRESH=<폴더명> → (TF_START_DIR 병용) 시작 폴더에 폴더 생성 후 좌측 트리 자동 갱신 검증 (제작자 지시 2026-07-23)
+        // 비브런시 사이드바가 스냅숏에서 백지라, 트리 노드 자식을 before/after 로그로 확인
+        if let folderName = ProcessInfo.processInfo.environment["TF_TREE_REFRESH"] {
+            let startDir = startDirectory
+            // 런치 시 네트워크 위치 첫 갱신(이연)이 트리를 재구성하므로, 정착 후 노드를 펼쳐 정상 상태를 재현
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { wc.debugRevealTree(startDir) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                NSLog("TREE_REFRESH before: [%@]", wc.debugTreeChildNames(of: startDir).joined(separator: ", "))
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { wc.debugCreateFolder(folderName) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                NSLog("TREE_REFRESH after: [%@]", wc.debugTreeChildNames(of: startDir).joined(separator: ", "))
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-tree.png")
+            }
+        }
+        // TF_TREE_NETWORK=1 → 트리 네트워크 그룹 확장(Bonjour 시작) 후 자식 구성(발견 호스트+기억 공유) 로그 검증 (제작자 제보 2026-07-23)
+        if ProcessInfo.processInfo.environment["TF_TREE_NETWORK"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { wc.debugExpandNetwork() }
+            for delay in [4.0, 10.0] {   // Bonjour 발견 + 로컬 네트워크 권한 지연 대비 2회
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    NSLog("TREE_NETWORK children: [%@]", wc.debugNetworkChildren().joined(separator: ", "))
+                }
+            }
+        }
+        // TF_TREE_SYNC=1 → (TF_START_DIR 병용) 트리 선택을 네트워크로 보낸 뒤 목록 파일 선택 시
+        // 트리가 현재 폴더로 복귀(reveal)하는지 로그 검증 (제작자 제보 2026-07-23)
+        if ProcessInfo.processInfo.environment["TF_TREE_SYNC"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                wc.debugSelectNetworkRow()
+                NSLog("TREE_SYNC before: %@", wc.debugTreeSelectedName())
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { wc.debugSelectFirstFile() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                NSLog("TREE_SYNC after: %@", wc.debugTreeSelectedName())
+            }
+        }
+        // TF_ICON_REFRESH=<자식폴더명> → (TF_START_DIR 병용) 자식 폴더의 Icon\r 삭제가 FSEvents로
+        // 트리 custom 재평가에 반영되는지 로그 검증 (제작자 제보 2026-07-23)
+        if let iconFolder = ProcessInfo.processInfo.environment["TF_ICON_REFRESH"] {
+            let startDir = startDirectory
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { wc.debugRevealTree(startDir) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                NSLog("ICON_REFRESH before: [%@]", wc.debugTreeChildNames(of: startDir).joined(separator: ", "))
+                // 커스텀 아이콘 제거를 외부 변경처럼 재현 — FSEvents 경유(eventDir=자식폴더, 부모=watched)
+                try? FileManager.default.removeItem(
+                    at: startDir.appendingPathComponent(iconFolder).appendingPathComponent("Icon\r"))
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                NSLog("ICON_REFRESH after: [%@]", wc.debugTreeChildNames(of: startDir).joined(separator: ", "))
+            }
+        }
+        // TF_FLICKER_TEST=1 → (TF_START_DIR 병용) 파일 선택 후 폴더에 연속 변경 발생 시
+        // 선택 재발행(=미리보기 재로드) 횟수를 로그 검증 — 초기 1회 이후 0이어야 (제작자 제보 2026-07-23)
+        if ProcessInfo.processInfo.environment["TF_FLICKER_TEST"] == "1" {
+            let startDir = startDirectory
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { wc.debugSelectFirstFile() }
+            // 초기화(선택·최초 리스팅) 정착 후 기준값 → 기존 파일 연속 "수정"(실사용 시나리오 — 다른 세션의
+            // 파일 수정) → 선택 재발행·전체 reloadData 둘 다 증가 0이어야(= 시각적 깜빡임 없음)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                NSLog("FLICKER baseline: selectNotify=%d fullReload=%d",
+                      wc.debugSelectNotifyCount(), wc.debugFullReloadCount())
+            }
+            for i in 1...5 {   // FSEvents 리로드 연발 유발 — 코얼레싱(0.5s) 간격보다 띄엄
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0 + Double(i) * 0.7) {
+                    try? Data("수정 \(i)".utf8).write(to: startDir.appendingPathComponent("가나다.txt"))
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 7.0) {
+                NSLog("FLICKER final: selectNotify=%d fullReload=%d (baseline과 같아야 — 증가 = 깜빡임)",
+                      wc.debugSelectNotifyCount(), wc.debugFullReloadCount())
+            }
+        }
+        // TF_NEW_FOLDER=1 → (TF_START_DIR 병용) 새 폴더가 이름변경 상태로 생성되는지 스냅숏 검증 (제작자 지시 2026-07-23)
+        if ProcessInfo.processInfo.environment["TF_NEW_FOLDER"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { wc.debugNewFolder() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-newfolder.png")
+            }
+        }
+        // TF_SET_TAG=<1~7> → (TF_START_DIR 병용) 첫 항목에 색상 태그 적용 후 목록 행 색 + 스와치 뷰 렌더 검증 (제작자 지시 2026-07-23)
+        if let tagRaw = ProcessInfo.processInfo.environment["TF_SET_TAG"], let n = Int(tagRaw) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { wc.debugSetTag(n) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-tag.png")
+                Self.debugRenderSwatch(current: n, to: "/tmp/treefinder-swatch.png")
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             guard let window = wc.window else { return }
             let out = URL(fileURLWithPath: "/tmp/treefinder-window.png")
@@ -367,6 +463,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     #if DEBUG
+    /// TF_SET_TAG — 태그 색 점 스와치 뷰를 단독 렌더(메뉴는 스냅숏 곤란 → 뷰 직접 캡처)
+    private static func debugRenderSwatch(current: Int, to path: String) {
+        let sw = TagSwatchView(current: current, onPick: { _ in })
+        guard let rep = sw.bitmapImageRepForCachingDisplay(in: sw.bounds) else { return }
+        sw.cacheDisplay(in: sw.bounds, to: rep)
+        let img = NSImage(size: sw.bounds.size)
+        img.lockFocus()
+        NSColor.windowBackgroundColor.setFill()
+        NSRect(origin: .zero, size: sw.bounds.size).fill()
+        rep.draw(in: NSRect(origin: .zero, size: sw.bounds.size))
+        img.unlockFocus()
+        if let tiff = img.tiffRepresentation, let out = NSBitmapImageRep(data: tiff) {
+            try? out.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        }
+    }
+
     /// 뷰 직접 렌더 스냅숏 — 창 서버 캡처가 백지인 환경 대응. 비브런시가 투명으로
     /// 렌더되어 다크 글자가 흰 PNG 바탕에 묻히므로 창 배경색 위에 합성한다(실측 2026-07-16).
     private static func debugCaptureContent(of window: NSWindow?, to path: String) {

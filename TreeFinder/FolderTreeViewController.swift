@@ -66,28 +66,60 @@ final class FolderNode {
         self.labelNumber = (try? url.resourceValues(forKeys: [.labelNumberKey]))?.labelNumber ?? 0
         // 특수 폴더(매핑·명시 심볼)는 심볼 고정 — 아이콘 앱이 남긴 표준 모양 Icon\r을
         // 커스텀으로 오판해 파란 폴더가 되는 사례 방지 (제작자 제보 2026-07-16: 문서·다운로드)
-        self.hasCustomIcon = (mapped == nil) && FileManager.default.fileExists(atPath: url.path + "/Icon\r")
+        self.hasCustomIcon = Self.customIconExists(at: url, mapped: mapped)
     }
+
+    /// 커스텀 아이콘 판정 단일 소스 — init과 refreshChildren 재평가 공용(규칙 4)
+    static func customIconExists(at url: URL, mapped: String?) -> Bool {
+        (mapped == nil) && FileManager.default.fileExists(atPath: url.path + "/Icon\r")
+    }
+
+    /// 이미 로드(펼쳐본)된 자식 — 강제 로드 없이 조회(트리 노드 탐색용). 미로드면 nil.
+    var loadedChildren: [FolderNode]? { children }
 
     /// ponytail: 동기 리스팅 — 로컬 폴더 전제. 네트워크 볼륨 지원 시 볼륨별 레인으로 이동
     func loadChildren() -> [FolderNode] {
         if isLeaf { return [] }
         if let children { return children }
-        // 숨김 표시 = 목록과 동일 설정(제작자 지적 — 트리·리스트 불일치). 토글 시 트리 전체 재구성으로 캐시 무효화.
-        let showHidden = UserDefaults.standard.bool(forKey: SettingsKeys.showHidden)
-        let urls = (try? FileManager.default.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey, .isSymbolicLinkKey],
-            options: showHidden ? [] : [.skipsHiddenFiles])) ?? []
-        let nodes = urls
-            .filter {
-                let v = try? $0.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey, .isSymbolicLinkKey])
-                return DirectoryLister.resolvesToDirectory($0, values: v) && !(v?.isPackage ?? false)
-            }
-            .map { FolderNode(url: $0) }
+        let nodes = childDirectoryEntries().map { FolderNode(url: $0.url) }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         children = nodes
         return nodes
+    }
+
+    /// 디스크 변경 반영 — 자식을 다시 읽되 URL·라벨·커스텀 아이콘이 같은 기존 노드는 재사용해 확장 상태를 보존한다.
+    /// 태그(labelNumber)·커스텀 아이콘(Icon\r)이 바뀐 노드는 재생성해 표시 갱신 (제작자 제보 2026-07-23).
+    /// 미로드 노드는 무연산(다음 loadChildren이 최신). 반환 = 실제 변화 여부(false면 다시 그릴 필요 없음).
+    @discardableResult
+    func refreshChildren() -> Bool {
+        guard !isLeaf, let existing = children else { return false }
+        let byURL = Dictionary(existing.map { ($0.url, $0) }, uniquingKeysWith: { a, _ in a })
+        let updated = childDirectoryEntries().map { entry -> FolderNode in
+            if let node = byURL[entry.url], node.labelNumber == entry.label,
+               node.hasCustomIcon == entry.custom { return node }   // 재사용
+            return FolderNode(url: entry.url)   // 신규 or 태그·아이콘 변경 → 재생성(표시 갱신)
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        // 전부 재사용 + 순서 동일이면 무변화 — 하위 폴더 활동이 잦아도 트리를 다시 그리지 않는다(깜빡임 방지)
+        let changed = updated.map(ObjectIdentifier.init) != existing.map(ObjectIdentifier.init)
+        children = updated
+        return changed
+    }
+
+    /// 자식 폴더 (URL, 라벨번호, 커스텀 아이콘) 목록 — loadChildren·refreshChildren 공용(규칙 4).
+    /// labelNumber는 이미 하는 resourceValues 페치에 얹어 읽음, 커스텀 아이콘은 fileExists 1회(가벼움).
+    /// 숨김 = 목록과 동일 설정, 폴더만(패키지=파일).
+    private func childDirectoryEntries() -> [(url: URL, label: Int, custom: Bool)] {
+        let showHidden = UserDefaults.standard.bool(forKey: SettingsKeys.showHidden)
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .labelNumberKey]
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: url, includingPropertiesForKeys: keys,
+            options: showHidden ? [] : [.skipsHiddenFiles])) ?? []
+        return urls.compactMap { u in
+            let v = try? u.resourceValues(forKeys: Set(keys))
+            guard DirectoryLister.resolvesToDirectory(u, values: v), !(v?.isPackage ?? false) else { return nil }
+            return (u, v?.labelNumber ?? 0,
+                    Self.customIconExists(at: u, mapped: SidebarSymbols.mappedName(forPath: u.path)))
+        }
     }
 }
 
@@ -128,6 +160,20 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     }
 
     private var networkItems: [NetworkLocationItem] { NetworkLocationStore.shared.items }
+
+    /// 발견 호스트(Bonjour) 래퍼 캐시 — 이름→아이템 재사용으로 reload 시 identity 유지
+    /// (제작자 지시 2026-07-23: 트리 네트워크에도 목록처럼 실제 발견 컴퓨터 표시)
+    private var hostItemCache: [String: NetworkHostItem] = [:]
+    private var networkHosts: [NetworkHostItem] {
+        NetworkBrowser.shared.hosts.map { name in
+            if let cached = hostItemCache[name] { return cached }
+            let item = NetworkHostItem(name)
+            hostItemCache[name] = item
+            return item
+        }
+    }
+    /// 네트워크 그룹 자식 = 발견 컴퓨터(위) + 기억된 공유(아래)
+    private var networkChildren: [Any] { networkHosts as [Any] + networkItems as [Any] }
 
     private static let favoritesKey = "FavoriteURLs"
 
@@ -207,6 +253,12 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
             self.outlineView.reloadItem(self.locationsGroup, reloadChildren: true)
             self.outlineView.expandItem(self.locationsGroup)
         }
+        // 발견 호스트 변화 → 네트워크 그룹만 갱신 (제작자 지시 2026-07-23 — 트리에도 발견 목록)
+        NotificationCenter.default.addObserver(forName: .networkHostsChanged, object: nil, queue: .main) {
+            [weak self] _ in
+            guard let self else { return }
+            self.outlineView.reloadItem(self.networkGroup, reloadChildren: true)
+        }
         // 숨김 표시 토글 등 설정 변경 → 트리 전체 재구성(FolderNode 캐시 무효화 — 목록과 동일 소스, 제작자 지적)
         NotificationCenter.default.addObserver(forName: .settingsChanged, object: nil, queue: .main) {
             [weak self] _ in
@@ -249,7 +301,7 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         case let group as SidebarGroup:
             // Locations = 로컬 위치들 + 네트워크(컨테이너) + 휴지통
             return group === favoritesGroup ? favorites.count : localLocations.count + 2
-        case is NetworkGroupMarker: return networkItems.count
+        case is NetworkGroupMarker: return networkChildren.count
         case let node as FolderNode: return node.loadChildren().count
         default: return 0
         }
@@ -262,7 +314,7 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
             if group === favoritesGroup { return favorites[index] }
             if index < localLocations.count { return localLocations[index] }
             return index == localLocations.count ? networkGroup : trashNode
-        case is NetworkGroupMarker: return networkItems[index]
+        case is NetworkGroupMarker: return networkChildren[index]
         case let node as FolderNode: return node.loadChildren()[index]
         default: return item as Any
         }
@@ -271,10 +323,16 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         switch item {
         case is SidebarGroup: return true
-        case is NetworkGroupMarker: return !networkItems.isEmpty
+        case is NetworkGroupMarker: return true   // 확장 시 Bonjour 시작 — 빈 상태에서도 펼쳐 검색 유도
         case let node as FolderNode: return !node.loadChildren().isEmpty
         default: return false
         }
+    }
+
+    /// 네트워크 그룹 확장 = Bonjour 브라우즈 시작(목록 진입과 동일 게이트 — 상시 탐색 안 함)
+    func outlineViewItemDidExpand(_ notification: Notification) {
+        guard notification.userInfo?["NSObject"] is NetworkGroupMarker else { return }
+        NetworkBrowser.shared.start()
     }
 
     // MARK: 드롭 타깃 (같은 볼륨=이동·다른 볼륨=복사·Option=복사 강제 — 목록과 동일 규약)
@@ -337,6 +395,16 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
             let cell = CellFactory.iconText(outlineView, identifier: .init("folderCell"))
             cell.textField?.stringValue = L("Network")
             cell.imageView?.image = NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
+            return cell
+        }
+        if let host = item as? NetworkHostItem {
+            // 발견된 네트워크 컴퓨터 — 목록과 동일 소스(Bonjour), 클릭 = 연결 (제작자 지시 2026-07-23)
+            let cell = CellFactory.iconText(outlineView, identifier: .init("folderCell"))
+            cell.textField?.stringValue = host.name
+            cell.imageView?.image = NSImage(systemSymbolName: "desktopcomputer",
+                                            accessibilityDescription: nil)
+            cell.imageView?.contentTintColor = nil
+            cell.alphaValue = 1
             return cell
         }
         if let network = item as? NetworkLocationItem {
@@ -421,11 +489,83 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         outlineView.scrollRowToVisible(row)
     }
 
+    /// 파일 목록의 디렉토리 내용 변경(파일 조작·FSEvents) → 대응 트리 노드만 갱신(확장 상태 보존).
+    /// (제작자 지시 2026-07-23 — 트리 자동 새로고침). materialize(펼쳐본)된 노드만 대상, 없으면 무연산.
+    /// 한계: FSEvents는 현재 보고 있는 폴더 하나만 감시하므로, 그 밖 위치의 폴더 변경은 여전히 미반영.
+    func refreshNode(at url: URL) {
+        let target = PathPasteboard.normalized(url.standardizedFileURL.path)
+        // 변화가 있을 때만 reloadItem — 하위 활동이 잦은 폴더에서 주기적 깜빡임 방지 (제작자 제보 2026-07-23)
+        if let node = materializedNode(matching: target), node.refreshChildren() {
+            outlineView.reloadItem(node, reloadChildren: true)
+        }
+        // 자신의 행(태그·커스텀 아이콘)은 부모의 자식 목록이 그림 — 부모도 재평가 (제작자 제보 2026-07-23)
+        let parent = PathPasteboard.normalized(
+            url.deletingLastPathComponent().standardizedFileURL.path)
+        if parent != target, let parentNode = materializedNode(matching: parent), parentNode.refreshChildren() {
+            outlineView.reloadItem(parentNode, reloadChildren: true)
+        }
+    }
+
+    /// 트리에 실재하는 루트(홈·볼륨)와 이미 로드된 하위만 순회해 경로 일치 노드를 찾는다(미로드 노드 강제 로드 금지).
+    private func materializedNode(matching normalizedPath: String) -> FolderNode? {
+        var stack = localLocations   // 휴지통은 잎이라 제외, 즐겨찾기는 FolderNode 아님
+        while let node = stack.popLast() {
+            if PathPasteboard.normalized(node.url.standardizedFileURL.path) == normalizedPath { return node }
+            if let loaded = node.loadedChildren { stack.append(contentsOf: loaded) }
+        }
+        return nil
+    }
+
+    #if DEBUG
+    /// TF_TREE_REFRESH 검증용 — 비브런시 사이드바가 스냅숏에서 백지라, 트리 노드의 실제 자식을 로그로 확인
+    func debugNodeChildNames(at url: URL) -> [String] {
+        let target = PathPasteboard.normalized(url.standardizedFileURL.path)
+        guard let node = materializedNode(matching: target) else { return ["<노드 미발견>"] }
+        return (node.loadedChildren ?? []).map {
+            $0.hasCustomIcon ? "\($0.name)[custom]" : $0.name
+        }
+    }
+
+    /// TF_TREE_NETWORK — 네트워크 그룹 확장(Bonjour 시작) 후 자식 구성을 로그로 확인
+    func debugExpandNetwork() { outlineView.expandItem(networkGroup) }
+
+    /// TF_TREE_SYNC — 트리 선택을 네트워크 그룹 행으로 강제(호스트 클릭·연결 실패 상황 재현)
+    func debugSelectNetworkRow() {
+        let row = outlineView.row(forItem: networkGroup)
+        guard row >= 0 else { return }
+        isRevealing = true   // onSelectNetwork 발화 억제 — 트리 선택만 이동
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        isRevealing = false
+    }
+
+    /// TF_TREE_SYNC — 현재 트리 선택 행의 표시명(복귀 검증용)
+    func debugSelectedName() -> String {
+        let item = outlineView.item(atRow: outlineView.selectedRow)
+        if let node = item as? FolderNode { return "폴더:\(node.name)" }
+        if item is NetworkGroupMarker { return "네트워크그룹" }
+        if let host = item as? NetworkHostItem { return "호스트:\(host.name)" }
+        return String(describing: item)
+    }
+    func debugNetworkChildren() -> [String] {
+        networkChildren.map {
+            if let host = $0 as? NetworkHostItem { return "호스트:\(host.name)" }
+            if let share = $0 as? NetworkLocationItem {
+                return "공유:\(share.name)\(share.mountPoint != nil ? "(마운트됨)" : "")"
+            }
+            return "?"
+        }
+    }
+    #endif
+
     @objc private func rowClicked() {
         guard outlineView.clickedRow >= 0 else { return }
         let item = outlineView.item(atRow: outlineView.clickedRow)
         if item is NetworkGroupMarker {
             onSelectNetwork?()   // 네트워크 브라우즈 (Finder 패리티)
+            return
+        }
+        if let host = item as? NetworkHostItem {
+            connectHostAndOpen(host)   // 발견 컴퓨터 클릭 = 연결(목록 더블클릭과 동일 경로)
             return
         }
         if let network = item as? NetworkLocationItem, network.mountPoint == nil {
@@ -434,6 +574,19 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         }
         guard let url = url(of: item) else { return }
         onSelect?(url)   // 중복 발화는 show()의 loadTask 취소로 무해
+    }
+
+    /// 발견 호스트 연결 — NetworkBrowser.connect(서비스명 해석→NetFS 마운트→탐색) 재사용
+    private func connectHostAndOpen(_ host: NetworkHostItem) {
+        NetworkBrowser.shared.connect(toService: host.name) { [weak self] mountPoint in
+            if let mountPoint {
+                self?.onSelect?(mountPoint)
+            } else {
+                let alert = NSAlert()
+                alert.messageText = String(format: L("Couldn't connect to %@"), host.name)
+                if let window = self?.view.window { alert.beginSheetModal(for: window) }
+            }
+        }
     }
 
     private func reconnectAndOpen(_ network: NetworkLocationItem) {
@@ -455,6 +608,14 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         menu.removeAllItems()
         guard outlineView.clickedRow >= 0 else { return }
         let item = outlineView.item(atRow: outlineView.clickedRow)
+        if let host = item as? NetworkHostItem {
+            let connect = NSMenuItem(title: L("Connect"), action: #selector(connectHost(_:)), keyEquivalent: "")
+            connect.target = self
+            connect.representedObject = host
+            connect.image = NSImage(systemSymbolName: "bolt.horizontal", accessibilityDescription: L("Connect"))
+            menu.addItem(connect)
+            return
+        }
         if let network = item as? NetworkLocationItem {
             buildNetworkMenu(menu, for: network)
             return
@@ -515,6 +676,11 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     @objc private func connectNetwork(_ sender: NSMenuItem) {
         guard let network = sender.representedObject as? NetworkLocationItem else { return }
         reconnectAndOpen(network)
+    }
+
+    @objc private func connectHost(_ sender: NSMenuItem) {
+        guard let host = sender.representedObject as? NetworkHostItem else { return }
+        connectHostAndOpen(host)
     }
 
     @objc private func ejectNetwork(_ sender: NSMenuItem) {

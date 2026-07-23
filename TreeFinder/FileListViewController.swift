@@ -213,6 +213,24 @@ final class TagRowView: NSTableRowView {
     }
 }
 
+/// 리스트 테이블 — Finder 키 규약(제작자 지시 2026-07-23): Enter=이름변경, ⌘↓=열기/폴더 진입.
+/// 화살표 선택·type-select는 NSTableView 기본 동작에 위임(super).
+final class TFTableView: NSTableView {
+    var onRename: (() -> Void)?
+    var onOpen: (() -> Void)?
+    override func keyDown(with event: NSEvent) {
+        let cmd = event.modifierFlags.contains(.command)
+        let code = Int(event.keyCode)
+        if (code == 36 || code == 76), !cmd, selectedRow >= 0 {   // Return·키패드 Enter → 이름변경
+            onRename?(); return
+        }
+        if code == 125, cmd, selectedRow >= 0 {                   // ⌘↓ → 열기/폴더 진입
+            onOpen?(); return
+        }
+        super.keyDown(with: event)
+    }
+}
+
 final class FileListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
                                     NSMenuDelegate, NSTextFieldDelegate,
                                     NSCollectionViewDataSource, NSCollectionViewDelegate {
@@ -230,8 +248,10 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         }
         let item = items[row]
         let newName = field.stringValue
-        guard !newName.isEmpty, newName != item.name else {
-            field.stringValue = item.name
+        // 표시명('/')을 디스크명(':')으로 변환해 비교 — 안 그러면 '개인/가족' 표시 == '개인:가족' 디스크가
+        // 서로 다르다고 오판돼, 변경 없는 편집도 '이미 존재' 오류를 낸다 (제작자 지시 2026-07-23)
+        guard !newName.isEmpty, Self.diskName(fromDisplay: newName) != item.name else {
+            field.stringValue = Self.displayName(fromDisk: item.name)
             if hadPendingRefresh { reloadCurrentDirectory() }
             return
         }
@@ -239,7 +259,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             let renamed = try Self.posixRename(item.url, toName: newName)
             registerRenameUndo(current: renamed, originalName: item.name)
         } catch {
-            field.stringValue = item.name
+            field.stringValue = Self.displayName(fromDisk: item.name)
             reportError(error)
         }
         reloadCurrentDirectory()
@@ -269,12 +289,18 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     var onStatusChange: ((Int, Int, Int64, Bool) -> Void)?
     /// 폴더 이동 통지 — 검색 필드 placeholder 등 창 크롬 갱신용
     var onDirectoryChange: ((URL) -> Void)?
+    /// 현재 폴더 내용 변경(파일 조작·FSEvents) → 트리 노드 갱신 신호 (제작자 지시 2026-07-23)
+    var onContentsChanged: ((URL) -> Void)?
 
     private(set) var directory: URL?
     private var allItems: [FileItem] = []   // 필터 전 원본
     private var items: [FileItem] = []      // 필터+정렬 적용본 (테이블 표시)
     private var filterText = ""
-    private let tableView = NSTableView()
+    private var searchTask: Task<Void, Never>?
+    private var searchResults: [FileItem]?   // nil = 검색 아님(현재 폴더). 값이 있으면 하위 트리 검색 결과
+    private var spotlightQuery: NSMetadataQuery?          // Spotlight 검색 (Finder 패리티 — 이름+내용)
+    private var spotlightObserver: NSObjectProtocol?
+    private let tableView = TFTableView()
     private let tabBar = TabBarView()
     private let messageLabel = NSTextField(labelWithString: "")
     /// 권한 오류 시에만 노출 — 전체 디스크 접근 설정 바로가기 (제작자 제보 2026-07-17)
@@ -314,6 +340,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     private var navigatingViaHistory = false
     private var fsEventStream: FSEventStreamRef?
     private var pendingRefresh = false   // EditGuard — rename 편집 중 보류된 갱신
+    private var pendingRenameURL: URL?   // 새 폴더 생성 직후 이름변경 진입 대상 (제작자 지시 2026-07-23)
     private var folderSizes: [String: FolderSize] = [:]   // 표시용 사본 (진실은 SizeService 캐시)
     private var pendingScanCount = 0                       // 상태바 "Calculating…" 표시용
     private lazy var operationEngine = FileOperationEngine(reportError: { [weak self] in
@@ -371,6 +398,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         tableView.style = .inset
         tableView.doubleAction = #selector(didDoubleClick(_:))
         tableView.target = self
+        tableView.onRename = { [weak self] in self?.renameSelected(nil) }   // Enter = 이름변경 (Finder 규약)
+        tableView.onOpen = { [weak self] in self?.openSelected() }          // ⌘↓ = 열기/진입 (Finder 규약)
         tableView.sortDescriptors = [NSSortDescriptor(key: SortKey.name.rawValue, ascending: true)]
         let contextMenu = NSMenu()
         contextMenu.delegate = self
@@ -611,12 +640,26 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     /// 선택 보존 없는 원시 reload — items를 방금 바꾼 rebuildItems 전용(잘못된 URL 캡처 방지)
+    #if DEBUG
+    private(set) var debugFullReloadCount = 0   // TF_FLICKER_TEST — 전체 reloadData(=가시 행 전부 재생성) 횟수
+    #endif
+
     private func reloadActiveViewRaw() {
+        #if DEBUG
+        debugFullReloadCount += 1
+        #endif
         if viewStyle == .list { tableView.reloadData() } else { collectionView.reloadData() }
     }
 
+    #if DEBUG
+    private(set) var debugSelectNotifyCount = 0   // TF_FLICKER_TEST — 선택 재발행(=미리보기 재로드) 횟수
+    #endif
+
     /// 프로그램적 선택 변경 뒤 공용 통지 — 컬렉션은 델리게이트가 침묵하므로 명시 호출 필수 (QC 위원)
     private func selectionDidSync() {
+        #if DEBUG
+        debugSelectNotifyCount += 1
+        #endif
         let indexes = activeSelectionIndexes()
         // 갤러리는 대형 미리보기와 같은 항목(마지막 선택) 기준 — 정보 페인 불일치 방지 (검증 minor)
         let anchor = viewStyle == .gallery ? indexes.last : indexes.first
@@ -788,6 +831,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         navigatingViaHistory = false
         self.directory = directory
         filterText = ""   // 폴더 이동 시 검색 필터 초기화 (Finder 규약)
+        searchTask?.cancel(); stopSpotlight(); searchResults = nil   // 진행 중 검색 취소 (제작자 지시 2026-07-23)
         if tabs.isEmpty { tabs = [TabState(url: directory, viewStyle: viewStyle)] } else { tabs[activeTab].url = directory }
         refreshTabBar()
         loadTask?.cancel()
@@ -878,6 +922,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     /// 현재 목록의 폴더들 크기를 요청 — 스캔 시작 주체는 SizeService 하나, 여긴 조회+표시만
     private func requestFolderSizes() {
         guard let directory else { return }
+        guard searchResults == nil else { return }   // 검색 결과(하위 트리 전체)는 크기 스캔 안 함 (제작자 지시 2026-07-23)
         // 비로컬 볼륨은 v1 제외 — 행 걸린 마운트가 스캔 워커를 점유하는 것 방지 (워게임 §4)
         guard (try? directory.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal ?? false else { return }
         let generation = directory
@@ -924,22 +969,42 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
+    /// 표시 항목 계산(필터+정렬) 단일 소스 — rebuildItems와 행 단위 갱신 경로 공용(규칙 4)
+    private func computeItems() -> [FileItem] {
+        let base: [FileItem]
+        if let searchResults {
+            base = searchResults                                 // 재귀 파일명 검색 결과(하위 폴더 포함)
+        } else if filterText.isEmpty {
+            base = allItems
+        } else {
+            // 재귀 검색 완료 전 빠른 첫 페인 — 현재 폴더 내 매칭만 즉시 표시(곧 검색 결과로 교체)
+            base = allItems.filter { $0.name.localizedCaseInsensitiveContains(filterText) }
+        }
+        return DirectoryLister.sorted(base, by: sortKey, ascending: sortAscending,
+                                      sizeOf: { [weak self] in self?.effectiveSize($0) })
+    }
+
     /// 필터+정렬을 원본에 재적용 — 검색·정렬·설정 변경이 전부 이 경로 하나를 탄다
     private func rebuildItems(scrollToTop: Bool = false, preserveSelection: Bool = false,
                               scrollToSelection: Bool = false) {
         let selected = preserveSelection
             ? Set(activeSelectionIndexes().compactMap { items.indices.contains($0) ? items[$0].url : nil })
             : []
-        let base = filterText.isEmpty
-            ? allItems
-            : allItems.filter { $0.name.localizedCaseInsensitiveContains(filterText) }
-        items = DirectoryLister.sorted(base, by: sortKey, ascending: sortAscending,
-                                       sizeOf: { [weak self] in self?.effectiveSize($0) })
+        items = computeItems()
         reloadActiveViewRaw()
         if preserveSelection {
             // 백그라운드 리빌드(FSEvents·폴더 크기)가 뷰포트를 점프시키지 않도록 스크롤은 정렬 변경만 (검증 minor)
             restoreSelection(urls: selected, scrollToFirst: scrollToSelection)
-            selectionDidSync()   // 컬렉션의 프로그램적 선택은 델리게이트 침묵 — 명시 재발행 (QC 위원)
+            // 선택이 실제로 변했을 때만 재발행 — 같은 선택의 재발행은 미리보기 재로드·경로바·트리 reveal을
+            // 매번 유발해, 파일이 계속 바뀌는 폴더(빌드·서버)에서 주기적 깜빡임이 됨 (제작자 제보 2026-07-23).
+            // Finder 규약: 폴더 내용이 바뀌어도 미리보기는 다시 로드하지 않는다.
+            let restored = Set(activeSelectionIndexes().compactMap {
+                items.indices.contains($0) ? items[$0].url : nil
+            })
+            if restored != selected {
+                selectionDidSync()   // 컬렉션의 프로그램적 선택은 델리게이트 침묵 — 명시 재발행 (QC 위원)
+            }
+            // 무변화면 재발행 생략 — 상태바는 아래 공통 notifyStatus()가 갱신
         } else {
             // 테이블 reload는 인덱스 기준 선택을 유지(실측) — 새 목록에서 엉뚱한 행이 선택되는 것 방지 (검증 major)
             setActiveSelection(IndexSet(), scrollToFirst: false)
@@ -957,7 +1022,63 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     func applyFilter(_ text: String) {
         filterText = text
-        rebuildItems()
+        searchTask?.cancel()
+        stopSpotlight()
+        searchResults = nil
+        rebuildItems()   // 즉시: 현재 폴더 내 매칭(빠른 첫 페인) 또는 전체 복귀
+        guard !text.isEmpty, let directory, directory.isFileURL else { return }
+        startSpotlightSearch(text, in: directory)
+    }
+
+    /// Spotlight(NSMetadataQuery) — Finder와 같은 색인 조회라 즉시·이름+내용 매칭 (제작자 피드백 2026-07-23:
+    /// 자작 순회는 대형 트리에서 수십 초 + 내용 미검색 → 교체. 실측: 문서 폴더 0.85초).
+    /// 미색인 볼륨 방어 = 0건이면 기존 재귀 이름 검색 폴백(그때만 디스크 순회 — 비용 미미).
+    private func startSpotlightSearch(_ text: String, in directory: URL) {
+        let query = NSMetadataQuery()
+        query.searchScopes = [directory]
+        query.predicate = NSPredicate(
+            format: "(kMDItemFSName CONTAINS[cd] %@) OR (kMDItemTextContent CONTAINS[cd] %@)", text, text)
+        spotlightObserver = NotificationCenter.default.addObserver(
+            forName: .NSMetadataQueryDidFinishGathering, object: query, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            query.disableUpdates()
+            query.stop()
+            // 결과 경로만 메인에서 뽑고(가벼움), FileItem 변환(리소스 페치)은 백그라운드로.
+            // 주의: NSMetadataItemURLKey는 nil 반환(실측) — kMDItemPath로 뽑아야 한다.
+            let urls = (0..<min(query.resultCount, 5000)).compactMap { i -> URL? in
+                guard let path = (query.result(at: i) as? NSMetadataItem)?
+                    .value(forAttribute: "kMDItemPath") as? String else { return nil }
+                return URL(fileURLWithPath: path)
+            }
+            self.stopSpotlight()
+            self.finishSearch(text, in: directory, urls: urls)
+        }
+        spotlightQuery = query
+        query.start()
+    }
+
+    /// Spotlight 결과 → FileItem 변환(백그라운드) → 표시. 0건이면 재귀 이름 검색 폴백(미색인 볼륨).
+    private func finishSearch(_ text: String, in directory: URL, urls: [URL]) {
+        let showHidden = UserDefaults.standard.bool(forKey: SettingsKeys.showHidden)
+        searchTask = Task.detached(priority: .userInitiated) {
+            let matches = urls.isEmpty
+                ? DirectoryLister.recursiveNameSearch(
+                    PathPasteboard.normalized(text), in: directory, showHidden: showHidden)
+                : DirectoryLister.sorted(urls.map(DirectoryLister.item(for:)))
+            if Task.isCancelled { return }
+            await MainActor.run { [weak self] in
+                guard let self, self.filterText == text, self.directory == directory else { return }   // stale 결과 폐기
+                self.searchResults = matches
+                self.rebuildItems(scrollToTop: true)
+            }
+        }
+    }
+
+    private func stopSpotlight() {
+        if let observer = spotlightObserver { NotificationCenter.default.removeObserver(observer) }
+        spotlightObserver = nil
+        spotlightQuery?.stop()
+        spotlightQuery = nil
     }
 
     @objc func goBack(_ sender: Any?) {
@@ -988,6 +1109,43 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         activeSelectionIndexes().compactMap { items.indices.contains($0) ? items[$0].url : nil }
     }
 
+    // MARK: Finder 색상 태그 (제작자 지시 2026-07-23)
+
+    private static func labelNumber(of url: URL) -> Int {
+        (try? url.resourceValues(forKeys: [.labelNumberKey]))?.labelNumber ?? 0
+    }
+
+    /// 선택 항목의 단일 라벨(전부 같으면 그 번호, 섞였거나 없으면 0) — 스와치 링 표시용
+    private func uniformLabel(of urls: [URL]) -> Int {
+        let set = Set(urls.map { Self.labelNumber(of: $0) })
+        return set.count == 1 ? (set.first ?? 0) : 0
+    }
+
+    /// 색상 태그 일괄 적용 — labelNumber 설정(0=지우기)이 Finder tagNames까지 동시 반영(실측).
+    /// undo는 이전 라벨을 담은 역적용을 등록(대칭 — redo도 자동). 실패는 표면화.
+    private func applyLabels(_ assignments: [(url: URL, label: Int)]) {
+        guard !assignments.isEmpty else { return }
+        let inverse = assignments.map { (url: $0.url, label: Self.labelNumber(of: $0.url)) }
+        var failure: Error?
+        for (url, label) in assignments {
+            do {
+                var u = url
+                var values = URLResourceValues()
+                values.labelNumber = label
+                try u.setResourceValues(values)
+            } catch { failure = error }
+        }
+        fileUndoManager.registerUndo(withTarget: self) { $0.applyLabels(inverse) }
+        fileUndoManager.setActionName(L("Tags"))
+        reloadCurrentDirectory()   // 목록 행 색 즉시 반영 + onContentsChanged로 트리 틴트 갱신
+        if let failure { reportError(failure) }
+    }
+
+    /// 컨텍스트 메뉴 색 점 클릭 진입점 (선택 전체에 적용)
+    func setTagLabel(_ number: Int, for urls: [URL]) {
+        applyLabels(urls.map { (url: $0, label: number) })
+    }
+
     /// 충돌 회피 명명 — 덮어쓰기 절대 없음 ("이름 2", "이름 3"…)
     static func availableURL(for proposed: URL) -> URL {
         guard FileManager.default.fileExists(atPath: proposed.path) else { return proposed }
@@ -1003,9 +1161,20 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
+    /// 사용자 표시 이름 → 디스크(POSIX) 이름: macOS 규약상 표시 '/'는 디스크에 콜론 ':'으로 저장(Finder 동일, 실측 확인).
+    /// NFC 정규화도 함께. leaf 이름 전용(부모 경로엔 적용 금지). (제작자 지시 2026-07-23)
+    static func diskName(fromDisplay name: String) -> String {
+        PathPasteboard.normalized(name).replacingOccurrences(of: "/", with: ":")
+    }
+
+    /// 디스크(POSIX) 이름 → 사용자 표시 이름: 콜론 ':'을 화면 '/'로 되돌린다(Finder 규약, 트리와 일치).
+    static func displayName(fromDisk name: String) -> String {
+        name.replacingOccurrences(of: ":", with: "/")
+    }
+
     /// FileManager.moveItem은 대상 경로를 syscall 직전 NFD로 재정규화(함정 ③) — POSIX rename에 NFC 바이트 직접
     static func posixRename(_ url: URL, toName newName: String) throws -> URL {
-        let name = PathPasteboard.normalized(newName)
+        let name = diskName(fromDisplay: newName)   // 표시 '/' → 디스크 ':' (제작자 지시 2026-07-23)
         let destPath = url.deletingLastPathComponent().path + "/" + name
         guard !FileManager.default.fileExists(atPath: destPath) else {
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteFileExistsError,
@@ -1190,13 +1359,14 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             let dest = Self.availableURL(for: directory.appendingPathComponent("untitled folder"))
             try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: false)
             registerUndoCreated(dest, action: L("New Folder"))
+            pendingRenameURL = dest   // 생성 직후 이름변경 상태로 (Finder 규약, 제작자 지시 2026-07-23)
         } catch { reportError(error) }
         reloadCurrentDirectory()
     }
 
     @objc func renameSelected(_ sender: Any?) {
         // 인라인 rename은 리스트 전용 — 아이콘 모드에서 숨은 테이블의 stale row 편집 방지 (워게임 §4)
-        guard viewStyle == .list else { return }
+        guard viewStyle == .list, searchResults == nil else { return }   // 검색 결과 중 rename 비활성 (제작자 지시 2026-07-23)
         let row = tableView.selectedRow
         guard row >= 0,
               let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSTableCellView,
@@ -1213,24 +1383,65 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
-    /// 파일 조작 후 현재 폴더 재리스팅 (선택 유지) — 내용이 변했으므로 크기 캐시도 무효화
+    /// 파일 조작 후 현재 폴더 재리스팅 (선택 유지).
+    /// 행 구성(URL 순서)이 그대로면 **바뀐 행만 조용히 갱신** — 전체 reloadData는 가시 행 전부(아이콘 포함)를
+    /// 재생성해, 파일이 계속 수정되는 폴더에서 주기적 깜빡임이 됨(제작자 제보 2026-07-23, Finder 규약).
+    /// 크기 캐시 무효화·재스캔도 구성 변화 때만(메타 변경마다 대형 폴더 재스캔 방지).
     func reloadCurrentDirectory() {
         guard let directory else { return }
-        let prefix = sizeKey(directory) + "/"
-        folderSizes = folderSizes.filter {
-            !($0.key.hasPrefix(prefix) && !$0.key.dropFirst(prefix.count).contains("/"))
-        }
-        Task { await SizeService.shared.invalidate(childrenOf: directory) }
+        if directory.isFileURL { onContentsChanged?(directory) }   // 트리 노드 자동 갱신 — 자체 변화 감지 내장
         loadTask?.cancel()
         loadTask = Task { [weak self] in
             guard let listed = try? await DirectoryLister.list(
                 directory, showHidden: UserDefaults.standard.bool(forKey: SettingsKeys.showHidden))
             else { return }
             guard let self, !Task.isCancelled else { return }
+            let oldItems = self.items
             self.allItems = listed
-            self.rebuildItems(preserveSelection: true)
-            self.requestFolderSizes()
+            let newItems = self.computeItems()
+            if newItems.map(\.url) == oldItems.map(\.url) {
+                var changedRows = IndexSet()
+                for (i, item) in newItems.enumerated() where item != oldItems[i] { changedRows.insert(i) }
+                self.items = newItems
+                if !changedRows.isEmpty { self.reloadRows(changedRows) }   // 수정일 등 메타만 제자리 교체
+                self.notifyStatus()
+            } else {
+                let prefix = self.sizeKey(directory) + "/"
+                self.folderSizes = self.folderSizes.filter {
+                    !($0.key.hasPrefix(prefix) && !$0.key.dropFirst(prefix.count).contains("/"))
+                }
+                Task { await SizeService.shared.invalidate(childrenOf: directory) }
+                self.rebuildItems(preserveSelection: true)
+                self.requestFolderSizes()
+            }
+            self.beginPendingRename()   // 새 폴더 생성 직후 이름변경 진입 (제작자 지시 2026-07-23)
         }
+    }
+
+    /// 지정 행만 다시 그리기 — 선택 보존(컬렉션은 reload가 선택을 지울 수 있어 재적용)
+    private func reloadRows(_ rows: IndexSet) {
+        if viewStyle == .list {
+            tableView.reloadData(forRowIndexes: rows,
+                                 columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+        } else {
+            let paths = Set(rows.map { IndexPath(item: $0, section: 0) })
+            let selection = collectionView.selectionIndexPaths
+            collectionView.reloadItems(at: paths)
+            collectionView.selectItems(at: selection, scrollPosition: [])
+        }
+    }
+
+    /// 새 폴더 생성 후 리로드가 끝나면 그 행을 선택하고 이름변경 편집에 진입 (Finder 규약)
+    private func beginPendingRename() {
+        guard let url = pendingRenameURL else { return }
+        pendingRenameURL = nil
+        // 디렉토리 URL의 후행 슬래시·표준화 차이로 == 가 어긋나므로 경로로 비교 (실측)
+        let target = url.standardizedFileURL.path
+        guard viewStyle == .list,
+              let row = items.firstIndex(where: { $0.url.standardizedFileURL.path == target }) else { return }
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        tableView.scrollRowToVisible(row)
+        DispatchQueue.main.async { [weak self] in self?.renameSelected(nil) }   // 셀 생성 후 편집 진입
     }
 
     /// ⌘O — 선택 항목 열기 (더블클릭과 동일: 단일 폴더 = 이동, 파일 = 실행)
@@ -1288,7 +1499,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
             retain: nil, release: nil, copyDescription: nil)
         // 주의: FSEvents는 재귀 감시 — 홈을 보면 ~ 전체 트리 이벤트가 흘러들어 리로드 루프가 됨(실측).
-        // 이벤트 경로가 감시 폴더 "자신"일 때만(=직계 자식 변경) 리로드한다.
+        // 이벤트 경로가 감시 폴더 "자신"(=직계 자식 변경) 또는 "직계 자식 폴더 바로 안"일 때만 리로드 —
+        // 후자는 자식 폴더의 태그·커스텀 아이콘(Icon\r) 변경을 트리·목록에 반영하기 위함
+        // (제작자 제보 2026-07-23: 커스텀 아이콘 삭제가 트리에 미반영). 더 깊은 경로는 계속 차단(폭주 방지).
         let callback: FSEventStreamCallback = { _, info, numEvents, eventPaths, _, _ in
             guard let info else { return }
             let target = Unmanaged<FileListViewController>.fromOpaque(info).takeUnretainedValue()
@@ -1296,10 +1509,18 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             let paths = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue() as? [String] ?? []
             let watchedNFC = PathPasteboard.normalized(watched)
             for path in paths.prefix(Int(numEvents)) {
-                let eventDir = PathPasteboard.normalized(
-                    URL(fileURLWithPath: path).standardizedFileURL.path)
+                let eventURL = URL(fileURLWithPath: path).standardizedFileURL
+                let eventDir = PathPasteboard.normalized(eventURL.path)
+                let eventParent = PathPasteboard.normalized(eventURL.deletingLastPathComponent().path)
                 if eventDir == watchedNFC {
-                    target.directoryDidChange()
+                    target.directoryDidChange()   // 직계 자식 변경 = 전체 리로드
+                    return
+                }
+                if eventParent == watchedNFC {
+                    // 자식 폴더 "안" 변경 = 트리 메타(태그·Icon\r)만 재평가 — 전체 리로드 금지.
+                    // 개발 폴더 등에서 하위 활동이 잦으면 목록·미리보기가 주기적으로 깜빡이는 부작용 실측
+                    // (제작자 제보 2026-07-23) — 트리는 변화 있을 때만 다시 그림.
+                    target.childMetaDidChange()
                     return
                 }
             }
@@ -1329,6 +1550,12 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             return
         }
         reloadCurrentDirectory()
+    }
+
+    /// 자식 폴더 내부 변경 — 트리 노드 메타(태그·커스텀 아이콘)만 재평가. 목록·미리보기는 건드리지 않는다.
+    private func childMetaDidChange() {
+        guard let directory, directory.isFileURL else { return }
+        onContentsChanged?(directory)
     }
 
     deinit {
@@ -1459,6 +1686,17 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                            #selector(addToFavoritesClicked(_:)), enabled: item.isDirectory))
         menu.addItem(entry(L("Share"), "square.and.arrow.up", #selector(shareClicked(_:))))
         menu.addItem(entry(L("Copy Path"), "link", #selector(copyPath(_:))))
+        menu.addItem(.separator())
+        // Finder 색상 태그 — 선택 전체에 색 점 클릭으로 일괄 지정/해제 (제작자 지시 2026-07-23)
+        let tagURLs = selectedURLs()
+        let tagHeader = NSMenuItem(title: L("Tags"), action: nil, keyEquivalent: "")
+        tagHeader.isEnabled = false
+        menu.addItem(tagHeader)
+        let swatchItem = NSMenuItem()
+        swatchItem.view = TagSwatchView(current: uniformLabel(of: tagURLs)) { [weak self] label in
+            self?.setTagLabel(label, for: tagURLs)
+        }
+        menu.addItem(swatchItem)
         menu.addItem(.separator())
         menu.addItem(entry(L("Get Info"), "info.circle", #selector(getInfoSelected(_:))))
     }
@@ -1766,8 +2004,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         case "name":
             let showExtensions = UserDefaults.standard.object(forKey: SettingsKeys.alwaysExtensions) as? Bool ?? true
             return showExtensions
-                ? item.name
-                : FileManager.default.displayName(atPath: item.url.path)   // hide-extension 플래그 존중
+                ? Self.displayName(fromDisk: item.name)                    // 디스크 ':' → 표시 '/' (제작자 지시 2026-07-23)
+                : FileManager.default.displayName(atPath: item.url.path)   // hide-extension 존중(':'→'/' 내장)
         case "dateModified": return Self.dateText(item.dateModified)
         case "dateCreated": return Self.dateText(item.dateCreated)
         case "size":
@@ -1783,6 +2021,33 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
+    /// 검색 결과에서 파일이 '들어있는 폴더'를 현재 폴더 기준 상대 경로로 — 동명 구분 (제작자 지시 2026-07-23).
+    /// 현재 폴더 직속이거나 검색 중이 아니면 nil(위치 생략).
+    private func searchLocationText(for item: FileItem) -> String? {
+        guard searchResults != nil, let directory, directory.isFileURL else { return nil }
+        let base = directory.standardizedFileURL.path
+        let parent = item.url.deletingLastPathComponent().standardizedFileURL.path
+        guard parent != base else { return nil }
+        return parent.hasPrefix(base + "/") ? String(parent.dropFirst(base.count + 1)) : parent
+    }
+
+    /// 파일명(진하게) + 들어있는 폴더(회색·소형) 한 줄 조합 — 검색 결과 이름 셀용.
+    /// attributed 문자열은 라벨의 lineBreakMode를 무시하고 랩핑됨(실측 — 제작자 제보 "줄바뀜") →
+    /// 단락 스타일로 한 줄 + 꼬리 줄임(…)을 명시.
+    static func nameWithLocation(_ name: String, location: String) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let s = NSMutableAttributedString(string: name, attributes: [
+            .foregroundColor: NSColor.labelColor,
+            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+            .paragraphStyle: paragraph])
+        s.append(NSAttributedString(string: "   " + location, attributes: [
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .font: NSFont.systemFont(ofSize: 11),
+            .paragraphStyle: paragraph]))
+        return s
+    }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let tableColumn else { return nil }
         let item = items[row]
@@ -1792,12 +2057,18 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         if key == "name" {
             let nameCell = CellFactory.iconText(tableView, identifier: .init("nameCell"))
             nameCell.imageView?.image = item.icon
+            if let location = searchLocationText(for: item) {
+                // 검색 결과 = 파일명 + 들어있는 폴더(회색) 한 줄 — 하위 폴더 동명 파일 구분 (제작자 지시 2026-07-23)
+                nameCell.textField?.attributedStringValue = Self.nameWithLocation(text, location: location)
+            } else {
+                nameCell.textField?.stringValue = text
+            }
             cell = nameCell
         } else {
             cell = CellFactory.text(tableView, identifier: .init(key + "Cell"),
                                     alignment: key == "size" ? .right : .left)
+            cell.textField?.stringValue = text
         }
-        cell.textField?.stringValue = text
         cell.alphaValue = cutSourceURLs.contains(item.url) ? 0.45 : 1.0   // 잘라내기 행 흐림
         return cell
     }
@@ -1828,6 +2099,22 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             NSLog("FIT column %@ -> %.0f", column.identifier.rawValue, width)
             column.width = width
         }
+    }
+
+    func debugCreateFolder(named name: String) {   // TF_TREE_REFRESH — 폴더 생성 후 reloadCurrentDirectory(트리 갱신 발화)
+        guard let directory, directory.isFileURL else { return }
+        try? FileManager.default.createDirectory(
+            at: directory.appendingPathComponent(name), withIntermediateDirectories: true)
+        reloadCurrentDirectory()
+    }
+
+    func debugNewFolder() { newFolder(nil) }   // TF_NEW_FOLDER — 새 폴더=이름변경 상태 진입 검증
+
+    func debugSetTag(_ number: Int) {   // TF_SET_TAG — 첫 항목에 색상 태그 적용(목록 행 색 검증)
+        guard !items.isEmpty else { return }
+        setActiveSelection(IndexSet(integer: 0), scrollToFirst: true)
+        if viewStyle != .list { selectionDidSync() }
+        setTagLabel(number, for: [items[0].url])
     }
     #endif
 

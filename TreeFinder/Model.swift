@@ -47,7 +47,7 @@ enum FileInfoFields {
     }
 }
 
-struct FileItem {
+struct FileItem: Equatable {   // 메타 변화 감지(행 단위 갱신 — 깜빡임 방지)용 자동 합성
     let url: URL
     let name: String
     /// 탐색 가능한 컨테이너 — 패키지(.app 등)는 파일처럼 취급하므로 false
@@ -186,6 +186,27 @@ enum DirectoryLister {
         )
     }
 
+    /// 재귀 파일명 검색 — 현재 폴더 하위 전체를 훑어 이름에 query가 든 항목 수집(Finder 패리티, 제작자 지시 2026-07-23).
+    /// 반드시 비동기 컨텍스트에서 호출(블로킹 열거). 상한·취소·숨김/비로컬 가드 내장.
+    static func recursiveNameSearch(_ query: String, in directory: URL,
+                                    showHidden: Bool, cap: Int = 5000) -> [FileItem] {
+        // 비로컬 볼륨은 재귀 열거가 행 위험 — 제외(SizeService 규약 승계)
+        if (try? directory.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal == false { return [] }
+        var options: FileManager.DirectoryEnumerationOptions = [.skipsPackageDescendants]
+        if !showHidden { options.insert(.skipsHiddenFiles) }
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory, includingPropertiesForKeys: resourceKeys, options: options) else { return [] }
+        // NFC 정규화 후 비교 — NFD로 저장된 한글 이름 vs NFC 입력 매칭 실패 방지(저비용 보험)
+        let needle = query.precomposedStringWithCanonicalMapping
+        var out: [FileItem] = []
+        for case let url as URL in enumerator {
+            if Task.isCancelled || out.count >= cap { break }
+            let name = url.lastPathComponent.precomposedStringWithCanonicalMapping
+            if name.localizedCaseInsensitiveContains(needle) { out.append(item(for: url)) }
+        }
+        return sorted(out)
+    }
+
     /// 정체성 3요소(decisions §1): 폴더는 어떤 정렬에서도 항상 위 그룹.
     /// 그룹 안에서 선택 키로 정렬하고, 동률(폴더의 크기·종류 등)은 이름 오름차순 폴백.
     /// sizeOf: 측정된 폴더 크기 주입(SizeService) — 크기 정렬에 폴더도 참여
@@ -264,6 +285,42 @@ enum DirectoryLister {
         } else {
             assertionFailure("posixRename failed in selfTest")
         }
+
+        // '/'↔':' 이름 변환 + 슬래시 rename이 디스크에 ':'으로 저장되는지 (제작자 지시 2026-07-23 — Finder 규약)
+        assert(FileListViewController.diskName(fromDisplay: "개인/가족") == "개인:가족", "diskName '/'→':' broken")
+        assert(FileListViewController.displayName(fromDisk: "개인:가족") == "개인/가족", "displayName ':'→'/' broken")
+        let slashFile = tmp.appendingPathComponent("슬래시원본.txt")
+        fm.createFile(atPath: slashFile.path, contents: Data())
+        if let r = try? FileListViewController.posixRename(slashFile, toName: "가/나") {
+            assert(fm.fileExists(atPath: tmp.appendingPathComponent("가:나").path),
+                   "posixRename must store '/' as ':' on disk")
+            assert(r.lastPathComponent == "가:나", "posixRename result should be the disk name")
+        } else {
+            assertionFailure("posixRename with slash failed")
+        }
+
+        // 재귀 파일명 검색 — 하위 폴더의 파일까지 찾는다 (제작자 지시 2026-07-23 — Finder 패리티)
+        let deep = tmp.appendingPathComponent("하위/더하위")
+        try? fm.createDirectory(at: deep, withIntermediateDirectories: true)
+        fm.createFile(atPath: deep.appendingPathComponent("찾을파일.log").path, contents: Data())
+        let hits = DirectoryLister.recursiveNameSearch("찾을파일", in: tmp, showHidden: false)
+        assert(hits.contains { $0.name == "찾을파일.log" }, "recursive name search must find nested file")
+
+        // 색상 태그 — labelNumber 설정(6=빨강)/해제(0) 왕복 (제작자 지시 2026-07-23 — Finder 태그)
+        var tagURL = tmp.appendingPathComponent("태그.txt")
+        fm.createFile(atPath: tagURL.path, contents: Data())
+        var rvSet = URLResourceValues(); rvSet.labelNumber = 6
+        try? tagURL.setResourceValues(rvSet)
+        assert((try? tagURL.resourceValues(forKeys: [.labelNumberKey]))?.labelNumber == 6, "label set broken")
+        var rvClear = URLResourceValues(); rvClear.labelNumber = 0
+        try? tagURL.setResourceValues(rvClear)
+        assert((try? tagURL.resourceValues(forKeys: [.labelNumberKey]))?.labelNumber == 0, "label clear broken")
+
+        // 네트워크 위치 중복 병합 키 — 같은 공유의 3가지 URL 표기가 한 키로 (제작자 제보 2026-07-23 "home 2개")
+        let variants = ["smb://user@NAS._smb._tcp.local/home", "smb://user@NAS.local./home", "smb://nas/home"]
+            .compactMap(URL.init(string:))
+            .map { NetworkLocationItem(remoteURL: $0, name: "home").dedupeKey }
+        assert(Set(variants).count == 1, "network dedupe key must unify URL spellings: \(variants)")
 
         // RestoreRecords 왕복 — 기록·조회(NFD 경로 폴백 포함)·제거 (decisions §14)
         let trashedFixture = tmp.appendingPathComponent("복원대상.txt")
