@@ -91,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         // TF_DUAL_PANE=1 → 듀얼 페인 상태를 스냅숏으로 검증 / =2 → 켰다 끈 복원 상태 검증
+        // =3 → 빈 공간 합성 클릭으로 활성 페인 전환 검증 (페인1→페인2 순, TF_PANE_FOCUS 로그)
         if let dualMode = ProcessInfo.processInfo.environment["TF_DUAL_PANE"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
                 wc.toggleDualPane(nil)
@@ -99,6 +100,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
                     wc.toggleDualPane(nil)
                 }
+            }
+            if dualMode == "3" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { wc.debugClickPaneEmptyArea(0) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { wc.debugClickPaneEmptyArea(1) }
             }
         }
         // TF_VIEW_STYLE=icons|gallery → 뷰 스타일을 전환해 스냅숏으로 검증
@@ -125,6 +130,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     NSLog("NETWORK hosts: %@", NetworkBrowser.shared.hosts.joined(separator: ", "))
                 }
             }
+        }
+        // TF_TERMINAL_CWD=1 → 최초 터미널을 열고 셸 pid 로그 — 시작 폴더를 외부 lsof로 실측 (제작자 지시 2026-07-23)
+        // 주의: TF_START_DIR(홈이 아닌 폴더) 병용 필수 — 홈 단독 실행은 구 동작(항상 홈)과 구분 불가한 위양성
+        if ProcessInfo.processInfo.environment["TF_TERMINAL_CWD"] == "1" {
+            let preview = { [weak wc] in
+                wc?.contentViewController?.children
+                    .compactMap { $0 as? NSSplitViewController }.first?
+                    .splitViewItems.last?.viewController as? PreviewViewController
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { preview()?.debugShowTerminal() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { preview()?.debugLogTerminalPid() }
         }
         // TF_TERMINAL_DROP=<경로> → 터미널 파일 드롭(경로 입력) E2E 검증 (+4s 별도 캡처)
         if let dropPath = ProcessInfo.processInfo.environment["TF_TERMINAL_DROP"] {

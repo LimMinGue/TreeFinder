@@ -219,6 +219,7 @@ final class FileIconItem: NSCollectionViewItem {
 final class TFCollectionView: NSCollectionView {
     var onDoubleClick: (() -> Void)?
     var onTypeSelect: ((String) -> Void)?
+    var onMouseDown: (() -> Void)?
     private(set) var clickedIndexPath: IndexPath?
     private var typeBuffer = ""
     private var typeResetTimer: Timer?
@@ -229,6 +230,7 @@ final class TFCollectionView: NSCollectionView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        onMouseDown?()   // 빈 공간 클릭도 듀얼 페인 활성 승격 (제작자 제보 2026-07-23)
         super.mouseDown(with: event)   // 선택 갱신 먼저 — 직전 선택이 열리는 사고 방지 (워게임 §4)
         if event.clickCount == 2,
            indexPathForItem(at: convert(event.locationInWindow, from: nil)) != nil {

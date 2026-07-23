@@ -218,6 +218,13 @@ final class TagRowView: NSTableRowView {
 final class TFTableView: NSTableView {
     var onRename: (() -> Void)?
     var onOpen: (() -> Void)?
+    var onMouseDown: (() -> Void)?
+    // 빈 공간 클릭(선택 무변화)도 듀얼 페인 활성 승격 — super(선택 변화 통지) "이전"이어야
+    // onSelect의 활성 페인 가드가 새 활성 기준으로 통과한다 (제작자 제보 2026-07-23)
+    override func mouseDown(with event: NSEvent) {
+        onMouseDown?()
+        super.mouseDown(with: event)
+    }
     override func keyDown(with event: NSEvent) {
         let cmd = event.modifierFlags.contains(.command)
         let code = Int(event.keyCode)
@@ -400,6 +407,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         tableView.target = self
         tableView.onRename = { [weak self] in self?.renameSelected(nil) }   // Enter = 이름변경 (Finder 규약)
         tableView.onOpen = { [weak self] in self?.openSelected() }          // ⌘↓ = 열기/진입 (Finder 규약)
+        tableView.onMouseDown = { [weak self] in self?.onActivate?() }      // 빈 공간 클릭 = 페인 활성
+
         tableView.sortDescriptors = [NSSortDescriptor(key: SortKey.name.rawValue, ascending: true)]
         let contextMenu = NSMenu()
         contextMenu.delegate = self
@@ -441,6 +450,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         collectionView.setDraggingSourceOperationMask([.copy, .move], forLocal: true)
         collectionView.onDoubleClick = { [weak self] in self?.openSelected() }
         collectionView.onTypeSelect = { [weak self] prefix in self?.typeSelect(prefix) }
+        collectionView.onMouseDown = { [weak self] in self?.onActivate?() }   // 빈 공간 클릭 = 페인 활성
         collectionScroll.documentView = collectionView
         collectionScroll.hasVerticalScroller = true
         collectionScroll.autohidesScrollers = true
