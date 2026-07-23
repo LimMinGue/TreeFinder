@@ -56,6 +56,64 @@ final class SidebarActionCellView: NSTableCellView {
     @objc private func actionTapped() { onAction?() }
 }
 
+/// Finder식 인라인 색 점 — 컨텍스트 메뉴에 태그 색상 7개 + 지우기(×)를 한 줄로 (제작자 지시 2026-07-23).
+/// 클릭 = 선택 항목에 라벨 일괄 적용 후 메뉴 닫힘. 현재 라벨(단일)은 액센트 링으로 표시.
+final class TagSwatchView: NSView {
+    /// Finder 시각 순서(빨·주·노·초·파·보·회)의 labelNumber — fileLabelColors 인덱스
+    private let labels = [6, 7, 5, 2, 4, 3, 1]
+    private let current: Int
+    private let onPick: (Int) -> Void
+    private let diameter: CGFloat = 15
+    private let gap: CGFloat = 11
+    private let leftInset: CGFloat = 21   // 메뉴 텍스트 좌측 정렬
+
+    init(current: Int, onPick: @escaping (Int) -> Void) {
+        self.current = current
+        self.onPick = onPick
+        let width = leftInset + CGFloat(labels.count + 1) * (diameter + gap) + 10
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 26))
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func dotRect(_ index: Int) -> NSRect {
+        NSRect(x: leftInset + CGFloat(index) * (diameter + gap),
+               y: (bounds.height - diameter) / 2, width: diameter, height: diameter)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let colors = NSWorkspace.shared.fileLabelColors
+        for (i, label) in labels.enumerated() {
+            let r = dotRect(i)
+            if label < colors.count { colors[label].setFill() }
+            NSBezierPath(ovalIn: r).fill()
+            NSColor.separatorColor.setStroke()
+            let edge = NSBezierPath(ovalIn: r); edge.lineWidth = 0.5; edge.stroke()
+            if label == current {   // 현재 라벨 = 액센트 링
+                NSColor.controlAccentColor.setStroke()
+                let ring = NSBezierPath(ovalIn: r.insetBy(dx: -3, dy: -3)); ring.lineWidth = 2; ring.stroke()
+            }
+        }
+        // 지우기(×) — 색 없음. 테두리 있는 빈 원 + × 로 또렷하게(옅은 배경에 묻히지 않게)
+        let cr = dotRect(labels.count)
+        NSColor.controlBackgroundColor.setFill(); NSBezierPath(ovalIn: cr).fill()
+        NSColor.tertiaryLabelColor.setStroke()
+        let border = NSBezierPath(ovalIn: cr); border.lineWidth = 1; border.stroke()
+        let x = NSBezierPath(); let m: CGFloat = 4.5
+        x.move(to: NSPoint(x: cr.minX + m, y: cr.minY + m)); x.line(to: NSPoint(x: cr.maxX - m, y: cr.maxY - m))
+        x.move(to: NSPoint(x: cr.minX + m, y: cr.maxY - m)); x.line(to: NSPoint(x: cr.maxX - m, y: cr.minY + m))
+        NSColor.secondaryLabelColor.setStroke(); x.lineWidth = 1.5; x.stroke()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        for i in 0...labels.count where dotRect(i).insetBy(dx: -4, dy: -4).contains(p) {
+            onPick(i < labels.count ? labels[i] : 0)   // 마지막 = 지우기(0)
+            enclosingMenuItem?.menu?.cancelTracking()
+            return
+        }
+    }
+}
+
 enum CellFactory {
     static func iconText(_ outlineOrTable: NSTableView, identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
         if let cell = outlineOrTable.makeView(withIdentifier: identifier, owner: nil) as? NSTableCellView {

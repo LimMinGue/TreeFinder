@@ -238,6 +238,11 @@ final class TFCollectionView: NSCollectionView {
 
     // type-select — NSCollectionView에는 기본 동작이 없음 (파워유저 위원, 이번 범위 포함)
     override func keyDown(with event: NSEvent) {
+        if Int(event.keyCode) == 125, event.modifierFlags.contains(.command),   // ⌘↓ = 열기/진입 (Finder 규약)
+           !selectionIndexPaths.isEmpty {
+            onDoubleClick?()
+            return
+        }
         if let chars = event.charactersIgnoringModifiers,
            let first = chars.unicodeScalars.first,
            !event.modifierFlags.contains(.command),

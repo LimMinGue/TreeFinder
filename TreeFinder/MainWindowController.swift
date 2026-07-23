@@ -369,6 +369,40 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
             self?.listController?.debugSelectFirstItem()   // 선택 시각·갤러리 미리보기까지 스냅숏에 포함
         }
     }
+
+    func debugSearch(_ query: String) {   // TF_SEARCH — 재귀 파일명 검색 경로
+        listController?.applyFilter(query)
+    }
+
+    func debugCreateFolder(_ name: String) {   // TF_TREE_REFRESH — 폴더 생성 → 트리 자동 갱신 경로
+        listController?.debugCreateFolder(named: name)
+    }
+
+    func debugTreeChildNames(of url: URL) -> [String] {   // TF_TREE_REFRESH — 트리 노드 자식 확인(로그 검증)
+        treeController?.debugNodeChildNames(at: url) ?? []
+    }
+
+    func debugRevealTree(_ url: URL) {   // TF_TREE_REFRESH — 네트워크 첫 갱신 정착 후 노드 확장(정상 상태 재현)
+        treeController?.reveal(url)
+    }
+
+    func debugNewFolder() { listController?.debugNewFolder() }   // TF_NEW_FOLDER
+
+    func debugSetTag(_ n: Int) { listController?.debugSetTag(n) }   // TF_SET_TAG
+
+    func debugExpandNetwork() { treeController?.debugExpandNetwork() }   // TF_TREE_NETWORK
+
+    func debugNetworkChildren() -> [String] { treeController?.debugNetworkChildren() ?? [] }
+
+    func debugSelectNetworkRow() { treeController?.debugSelectNetworkRow() }   // TF_TREE_SYNC
+
+    func debugTreeSelectedName() -> String { treeController?.debugSelectedName() ?? "" }
+
+    func debugSelectFirstFile() { listController?.debugSelectFirstItem() }   // TF_TREE_SYNC — 목록 첫 항목 선택
+
+    func debugSelectNotifyCount() -> Int { listController?.debugSelectNotifyCount ?? -1 }   // TF_FLICKER_TEST
+
+    func debugFullReloadCount() -> Int { listController?.debugFullReloadCount ?? -1 }   // TF_FLICKER_TEST
     #endif
 
     /// File ▸ New Tab(⌘T) — 커스텀 탭 스트립(파일 목록 영역 스코프)에 새 탭 (decisions §10)
@@ -397,6 +431,13 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
             self.previewController?.showFromSelection(fileURL)   // 터미널 탭이어도 미리보기로 전환 (§파일 목록)
             let directoryURL = (list.directory?.isFileURL == true) ? list.directory : nil
             self.contentController?.pathBar.show(fileURL ?? directoryURL)   // 선택 없으면 현재 폴더 (§9)
+            // 파일 선택 시에도 트리를 현재 폴더로 복귀 — 네트워크 호스트 클릭(연결 실패 등)으로
+            // 트리 선택이 딴 곳에 가 있어도 목록 상호작용이 동기화 (제작자 제보 2026-07-23).
+            // reveal은 이미 선택된 행이면 no-op — 평상시 비용 없음.
+            if item != nil, let directoryURL,
+               UserDefaults.standard.object(forKey: SettingsKeys.expandToOpenFolder) as? Bool ?? true {
+                self.treeController?.reveal(directoryURL)
+            }
         }
         list.onStatusChange = { [weak self, weak list] total, selected, bytes, calculating in
             guard let self, let list, list === self.listController else { return }   // 비활성 FSEvents 방어
@@ -410,6 +451,9 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
             guard let self, let list, list === self.listController else { return }
             self.refreshChrome(directory: url)
         }
+        // 파일 목록 내용 변경(파일 조작·FSEvents) → 좌측 트리 해당 노드 자동 갱신 (제작자 지시 2026-07-23).
+        // 활성 가드 없음 — refreshNode는 경로 일치 노드만 건드리는 idempotent 연산(듀얼 페인에서도 안전).
+        list.onContentsChanged = { [weak self] url in self?.treeController?.refreshNode(at: url) }
         // 스타일 변경은 디렉터리 이동이 아니라 refreshChrome을 안 탐 — 별도 통지 필수 (코드정합 위원)
         list.onViewStyleChange = { [weak self, weak list] _ in
             guard let self, let list, list === self.listController else { return }

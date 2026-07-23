@@ -33,16 +33,25 @@ final class NetworkBrowser {
     }
 
     /// 서비스명 → 호스트명 해석 후 NetFS 마운트 — 인증·공유 선택은 시스템 UI(Finder 규약)
+    private var connecting = false   // 더블클릭 = 해석 2회 병렬 → 취소 직후 둘째가 창을 또 띄우는 레이스 차단 (제작자 제보 2026-07-23)
+
     func connect(toService name: String, completion: @escaping @MainActor (URL?) -> Void) {
+        guard !connecting else { return }   // 중복 클릭 = 조용히 무시
+        connecting = true
         ServiceResolver(name: name) { hostName in
             Task { @MainActor in
                 let fallback = name.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed)
                     .map { $0 + ".local" }
                 guard let host = hostName ?? fallback, let url = URL(string: "smb://\(host)") else {
+                    NetworkBrowser.shared.connecting = false
                     completion(nil)
                     return
                 }
-                NetworkLocationStore.shared.mount(url, completion: completion)
+                let started = NetworkLocationStore.shared.mount(url) { mounted in
+                    NetworkBrowser.shared.connecting = false
+                    completion(mounted)
+                }
+                if !started { NetworkBrowser.shared.connecting = false }   // mount가 무시하면 가드 즉시 해제
             }
         }
     }
@@ -89,6 +98,23 @@ final class NetworkLocationItem {
         self.name = name
         self.mountPoint = mountPoint
     }
+
+    /// 같은 공유의 다른 URL 표기(`smb://nas/home` vs `smb://NAS._smb._tcp.local/home`)를 하나로 —
+    /// "home 2개" 중복 제보의 원인(문자열 완전일치 판정) 교정 (제작자 제보 2026-07-23)
+    var dedupeKey: String {
+        var host = (remoteURL.host ?? "").lowercased()
+        if host.hasSuffix(".") { host = String(host.dropLast()) }   // FQDN 후행 점("nas.local." 실측)
+        if let range = host.range(of: "._smb._tcp") { host = String(host[..<range.lowerBound]) }
+        if host.hasSuffix(".local") { host = String(host.dropLast(6)) }
+        return host + remoteURL.path.lowercased()
+    }
+}
+
+/// 트리 네트워크 그룹의 발견 호스트 행 마커 — 이름 문자열을 그대로 아이템으로 쓰면
+/// NSOutlineView identity가 깨지므로 래퍼로 (제작자 지시 2026-07-23: 트리에도 발견 목록 표시)
+final class NetworkHostItem {
+    let name: String
+    init(_ name: String) { self.name = name }
 }
 
 /// 네트워크 위치 기억/재연결 (워게임 [2026-07-16]_wargame_network_locations.md · 원본 1.3.0)
@@ -101,12 +127,12 @@ final class NetworkLocationStore {
     private(set) var items: [NetworkLocationItem] = []
 
     private init() {
-        items = (UserDefaults.standard.array(forKey: Self.key) as? [[String: String]] ?? [])
+        items = Self.deduped((UserDefaults.standard.array(forKey: Self.key) as? [[String: String]] ?? [])
             .compactMap { entry in
                 guard let remote = entry["remote"], let url = URL(string: remote),
                       let name = entry["name"] else { return nil }
                 return NetworkLocationItem(remoteURL: url, name: name)
-            }
+            })
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.didMountNotification, object: nil, queue: .main) {
             [weak self] _ in Task { @MainActor in self?.refresh() }
@@ -124,24 +150,41 @@ final class NetworkLocationStore {
                                   forKey: Self.key)
     }
 
+    /// 정규화 키 기준 중복 병합 — 마운트된 항목 우선 보존 (제작자 제보 2026-07-23 "home 2개")
+    private static func deduped(_ list: [NetworkLocationItem]) -> [NetworkLocationItem] {
+        var seen: [String: NetworkLocationItem] = [:]
+        var out: [NetworkLocationItem] = []
+        for item in list {
+            if let existing = seen[item.dedupeKey] {
+                if existing.mountPoint == nil, let mount = item.mountPoint { existing.mountPoint = mount }
+                continue
+            }
+            seen[item.dedupeKey] = item
+            out.append(item)
+        }
+        return out
+    }
+
     /// 마운트 상태 대조 + 새 네트워크 마운트 자동 기억 (원본: "마운트한 모든 공유를 기억")
     func refresh() {
         let keys: [URLResourceKey] = [.volumeIsLocalKey, .volumeNameKey, .volumeURLForRemountingKey]
         let volumes = FileManager.default.mountedVolumeURLs(
             includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
-        var mountedRemotes: [String: URL] = [:]   // remote absoluteString → mount point
+        var mountedByKey: [String: URL] = [:]   // dedupeKey → mount point
         for volume in volumes {
             guard let values = try? volume.resourceValues(forKeys: Set(keys)),
                   values.volumeIsLocal == false,
                   let remote = values.volumeURLForRemounting else { continue }   // 재마운트 URL 없으면 기억 불가
-            mountedRemotes[remote.absoluteString] = volume
-            if !items.contains(where: { $0.remoteURL.absoluteString == remote.absoluteString }) {
+            let probe = NetworkLocationItem(remoteURL: remote, name: "")
+            mountedByKey[probe.dedupeKey] = volume
+            if !items.contains(where: { $0.dedupeKey == probe.dedupeKey }) {   // 표기 달라도 같은 공유면 중복 기억 금지
                 items.append(NetworkLocationItem(remoteURL: remote,
                                                  name: values.volumeName ?? remote.lastPathComponent,
                                                  mountPoint: volume))
             }
         }
-        for item in items { item.mountPoint = mountedRemotes[item.remoteURL.absoluteString] }
+        for item in items { item.mountPoint = mountedByKey[item.dedupeKey] }
+        items = Self.deduped(items)   // 기존 저장분의 중복도 이 기회에 정리
         save()
         NotificationCenter.default.post(name: .networkLocationsChanged, object: nil)
     }
@@ -154,7 +197,13 @@ final class NetworkLocationStore {
 
     /// NetFS 마운트 — 키체인 우선, 필요할 때만 시스템 인증 UI (PLAYBOOK 2부 §2-5)
     /// ⌘K(서버에 연결)와 재연결이 공용. 성공 시 didMount 옵저버가 자동 기억.
-    func mount(_ remoteURL: URL, completion: @escaping @MainActor (URL?) -> Void) {
+    private var mounting = false   // 진행 중 가드 — 더블클릭·인증 창 중 재클릭이 창을 또 띄우는 것 방지 (제작자 제보 2026-07-23)
+
+    /// 반환 false = 진행 중이라 무시됨(완료 콜백 안 옴 — 호출자는 자체 상태를 풀 것)
+    @discardableResult
+    func mount(_ remoteURL: URL, completion: @escaping @MainActor (URL?) -> Void) -> Bool {
+        guard !mounting else { return false }   // 중복 요청 = 조용히 무시(첫 요청이 처리 중)
+        mounting = true
         let openOptions = NSMutableDictionary()
         openOptions[kNAUIOptionKey] = kNAUIOptionAllowUI
         var requestID: AsyncRequestID?
@@ -163,10 +212,15 @@ final class NetworkLocationStore {
             openOptions, nil, &requestID, DispatchQueue.main) { status, _, mountpoints in
             let mounted = (mountpoints as? [String])?.first.map { URL(fileURLWithPath: $0) }
             Task { @MainActor in
+                NetworkLocationStore.shared.mounting = false
                 completion(status == 0 ? mounted : nil)
             }
         }
-        if status != 0 { completion(nil) }
+        if status != 0 {
+            mounting = false
+            completion(nil)
+        }
+        return true
     }
 
     /// 원클릭 재연결
