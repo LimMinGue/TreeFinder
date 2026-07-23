@@ -374,6 +374,26 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         listController?.applyFilter(query)
     }
 
+    /// TF_DUAL_PANE=3 — 페인 빈 공간 합성 클릭(실제 디스패치 경로)으로 활성 전환 검증 (제작자 제보 2026-07-23)
+    func debugClickPaneEmptyArea(_ index: Int) {
+        guard panes.indices.contains(index), let window else { return }
+        let view = panes[index].view
+        let point = view.convert(NSPoint(x: view.bounds.midX, y: 20), to: nil)   // 하단 = 행 아래 빈 영역
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            if let event = NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 1, pressure: 1) {
+                NSApp.postEvent(event, atStart: false)   // down+up을 큐로 — 테이블 추적 루프 행 방지
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self else { return }
+            NSLog("TF_PANE_FOCUS clicked=%d active=%d", index, self.activePaneIndex)
+        }
+    }
+
     func debugCreateFolder(_ name: String) {   // TF_TREE_REFRESH — 폴더 생성 → 트리 자동 갱신 경로
         listController?.debugCreateFolder(named: name)
     }

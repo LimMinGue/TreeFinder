@@ -7,6 +7,8 @@ import WebKit
 /// 파일 드롭을 받는 터미널 — 드롭 = 전체 경로 입력 (Terminal.app 규약, 제작자 지시 2026-07-16)
 final class DropTerminalView: LocalProcessTerminalView {
     var onDropFiles: (([URL]) -> Void)?
+    /// 스폰 당시 요청된 시작 폴더 — Restart Shell이 같은 위치에서 재시작하도록 보존 (적대검증 2026-07-23)
+    var spawnDirectory: URL?
     /// Enter로 제출된 입력 줄 — 명령 도움말 밴드 트리거 (제작자 지시 2026-07-16)
     var onCommandSubmit: ((String) -> Void)?
     /// 이 터미널이 포커스일 때의 키 입력 — Broadcast input 중계용 (제작자 지시 2026-07-21)
@@ -929,7 +931,9 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             ])
             terminalSplit = split
         }
-        terminalSessions = [makeTerminalSession()]
+        // 최초 열기(마지막 탭 닫고 재열기 포함) = 보고 있는 폴더에서 시작 (제작자 지시 2026-07-23).
+        // + 새 탭은 홈 유지(2026-07-21 지시) — 확장은 제작자 판단 대기.
+        terminalSessions = [makeTerminalSession(startingAt: currentDirectory)]
         activeTerminalIndex = 0
         mountTerminal(terminalSessions[0])
         refreshTerminalTabBar()
@@ -944,7 +948,7 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     }
 
     /// 세션 하나 생성 — 로그인 셸 PTY + 드롭/도움말 배선 + 폰트
-    private func makeTerminalSession() -> DropTerminalView {
+    private func makeTerminalSession(startingAt startDirectory: URL? = nil) -> DropTerminalView {
         let terminal = DropTerminalView(frame: .zero)
         // 드롭을 받은 그 터미널로 직접 전송 — 활성 인덱스와 무관하게 정확 (제작자 제보 2026-07-17 보강)
         terminal.onDropFiles = { [weak self, weak terminal] urls in
@@ -964,10 +968,27 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         terminal.translatesAutoresizingMaskIntoConstraints = false
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let shellName = (shell as NSString).lastPathComponent
-        // 로그인 셸 + 시작 위치는 항상 홈 (제작자 지시 2026-07-21).
+        // 로그인 셸. 시작 위치 = 지정 폴더(최초 열기 — 제작자 지시 2026-07-23), 미지정이면 홈(2026-07-21).
         // 지정하지 않으면 앱 프로세스의 cwd(Finder 실행 시 "/")를 물려받아 세션마다 위치가 달라짐.
+        // 가드(적대검증 2026-07-23 반영, 실패 시 전부 홈 폴백):
+        //  ① 비파일 URL(네트워크 센티널) ② 비로컬 볼륨 — 죽은 마운트 동기 stat이 메인 스레드를
+        //     얼리는 함정이라 검사 자체를 안 함(SizeService·GetInfo와 동일 규약, 네트워크 폴더는 홈 시작)
+        //  ③ 소멸 폴더 ④ x권한 없는 폴더 — fileExists는 통과해도 chdir이 EACCES로 실패하면
+        //     SwiftTerm이 앱 cwd("/")를 물려받는 구멍. 검사~스폰 사이 TOCTOU 잔여 창은 문서화된 한계.
+        var isDirectory: ObjCBool = false
+        let startPath: String
+        if let dir = startDirectory, dir.isFileURL,
+           (try? dir.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal ?? false,
+           FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory),
+           isDirectory.boolValue,
+           FileManager.default.isExecutableFile(atPath: dir.path) {
+            startPath = dir.path
+        } else {
+            startPath = FileManager.default.homeDirectoryForCurrentUser.path
+        }
+        terminal.spawnDirectory = startDirectory   // Restart Shell 제자리 재시작용(재검증은 재시작 시점에)
         terminal.startProcess(executable: shell, execName: "-\(shellName)",
-                              currentDirectory: FileManager.default.homeDirectoryForCurrentUser.path)
+                              currentDirectory: startPath)
         terminal.menu = buildTerminalMenu(for: terminal)
         applyTerminalFont(to: terminal)
         TerminalTheme.current.apply(to: terminal)
@@ -1138,8 +1159,10 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
 
     @objc private func restartShell() {
         guard terminalSessions.indices.contains(activeTerminalIndex) else { return }
-        terminalSessions[activeTerminalIndex].removeFromSuperview()
-        terminalSessions[activeTerminalIndex] = makeTerminalSession()   // 이전 참조 해제 → PTY SIGHUP
+        let old = terminalSessions[activeTerminalIndex]
+        old.removeFromSuperview()
+        // 스폰 당시 시작 폴더로 제자리 재시작 — 최초 탭(현재 폴더 스폰)이 홈으로 둔갑하는 비대칭 방지 (적대검증)
+        terminalSessions[activeTerminalIndex] = makeTerminalSession(startingAt: old.spawnDirectory)   // 이전 참조 해제 → PTY SIGHUP
         mountTerminal(terminalSessions[activeTerminalIndex])
         updateVisibility()
     }
@@ -1238,6 +1261,12 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     func debugShowTerminal() {   // TF_TERMINAL_TAB=1 스냅숏 검증용
         tabs.selectedSegment = 1
         tabChanged()
+    }
+
+    /// TF_TERMINAL_CWD=1 — 최초 터미널 셸 pid 로그(외부 lsof로 실제 작업 폴더 실측, 제작자 지시 2026-07-23)
+    func debugLogTerminalPid() {
+        guard terminalSessions.indices.contains(activeTerminalIndex) else { return }
+        NSLog("TF_TERMINAL_CWD pid=%d", terminalSessions[activeTerminalIndex].process.shellPid)
     }
 
     func debugTerminalDrop(_ path: String) {   // TF_TERMINAL_DROP=<경로> — 드롭 경로 입력 E2E 검증
