@@ -644,7 +644,7 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         menu.addItem(entry(L("Open in New Window"), "macwindow.badge.plus", #selector(openInNewWindow(_:))))
         menu.addItem(entry(L("Open in Terminal"), "terminal", #selector(openInTerminal(_:))))
         menu.addItem(.separator())
-        // 목록 메뉴와 동일 용어·심볼 — 트리 폴더도 경로 복사 (제작자 지시 2026-07-23)
+        // 목록 메뉴와 동일 용어·심볼 — 트리 폴더도 경로 복사 (제작자 지시 2026-07-24)
         menu.addItem(entry(L("Copy Path"), "link", #selector(copyPathAction(_:))))
         menu.addItem(.separator())
 
