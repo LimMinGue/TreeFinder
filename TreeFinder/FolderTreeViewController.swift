@@ -129,12 +129,13 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     var onSelectNetwork: (() -> Void)?
     var onOpenInNewTab: ((URL) -> Void)?
     var onOpenInNewWindow: ((URL) -> Void)?
-    /// (소스들, 타깃 폴더, 복사 강제) — 실제 이동/복사는 FileListViewController.performDrop이 수행
-    var onDropFiles: (([URL], URL, Bool) -> Void)?
+    /// (소스들, 타깃 폴더, 복사 강제, 드롭스택 출처) — 실제 이동/복사는 FileListViewController.performDrop이 수행
+    var onDropFiles: (([URL], URL, Bool, DropStackView?) -> Void)?
 
     private let favoritesGroup = SidebarGroup(L("Favorites"))
     private let locationsGroup = SidebarGroup(L("Locations"))
     private let outlineView = NSOutlineView()
+    private let dropStack = DropStackView()   // 프로퍼티 승격 — 드롭 완료 비움·검증 접근 (§9 ① 2026-07-23)
 
     /// Locations = 홈 + 로컬 볼륨 + 네트워크(컨테이너) + 휴지통 (제작자 지시 2026-07-16)
     private var localLocations: [FolderNode] = FolderTreeViewController.buildLocalLocations()
@@ -221,7 +222,6 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         scroll.drawsBackground = false
 
         // Drop Stack = 사이드바 하단 고정 선반 (decisions §9 ①)
-        let dropStack = DropStackView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         dropStack.translatesAutoresizingMaskIntoConstraints = false
         let container = NSView()
@@ -354,7 +354,8 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
               let sources = info.draggingPasteboard.readObjects(
                   forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
               !sources.isEmpty else { return false }
-        onDropFiles?(sources, target, NSEvent.modifierFlags.contains(.option))
+        onDropFiles?(sources, target, NSEvent.modifierFlags.contains(.option),
+                     info.draggingSource as? DropStackView)   // 스택 출처 = 이동/복사 메뉴 (§9 ①)
         return true
     }
 
@@ -517,6 +518,16 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     }
 
     #if DEBUG
+    /// TF_STACK_DROP — 드롭스택 접근(명시 이동/복사·비움·prune 검증)
+    var debugDropStack: DropStackView { dropStack }
+
+    /// TF_TREE_COPYPATH — 메뉴 핸들러 실구동(representedObject 배선 + NFC 창구 경유)
+    func debugCopyPath(_ url: URL) {
+        let item = NSMenuItem()
+        item.representedObject = url
+        copyPathAction(item)
+    }
+
     /// TF_TREE_REFRESH 검증용 — 비브런시 사이드바가 스냅숏에서 백지라, 트리 노드의 실제 자식을 로그로 확인
     func debugNodeChildNames(at url: URL) -> [String] {
         let target = PathPasteboard.normalized(url.standardizedFileURL.path)
@@ -633,6 +644,9 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         menu.addItem(entry(L("Open in New Window"), "macwindow.badge.plus", #selector(openInNewWindow(_:))))
         menu.addItem(entry(L("Open in Terminal"), "terminal", #selector(openInTerminal(_:))))
         menu.addItem(.separator())
+        // 목록 메뉴와 동일 용어·심볼 — 트리 폴더도 경로 복사 (제작자 지시 2026-07-23)
+        menu.addItem(entry(L("Copy Path"), "link", #selector(copyPathAction(_:))))
+        menu.addItem(.separator())
 
         if item is FolderNode {
             let add = entry(L("Add to Favorites"), "pin", #selector(addFavorite(_:)))
@@ -717,6 +731,11 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     @objc private func openInTerminal(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
         ExternalOpen.inTerminal(url)
+    }
+
+    @objc private func copyPathAction(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        PathPasteboard.copy(url.path)   // NFC 보정 단일 창구 (decisions §5)
     }
 
     /// 파일 목록 컨텍스트 메뉴의 L("Add to Favorites")도 이 경로로 들어온다

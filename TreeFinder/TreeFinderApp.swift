@@ -131,6 +131,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
+        // TF_STACK_DROP=move|copy|prune;<src경로> → 드롭스택 명시 이동/복사·완료 비움·소멸 정리 검증 (TF_START_DIR=목적지 병용)
+        if let spec = ProcessInfo.processInfo.environment["TF_STACK_DROP"] {
+            let parts = spec.split(separator: ";", maxSplits: 1).map(String.init)
+            if parts.count == 2 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    wc.debugStackDrop(mode: parts[0], source: URL(fileURLWithPath: parts[1]))
+                }
+            }
+        }
         // TF_TERMINAL_CWD=1 → 최초 터미널을 열고 셸 pid 로그 — 시작 폴더를 외부 lsof로 실측 (제작자 지시 2026-07-23)
         // 주의: TF_START_DIR(홈이 아닌 폴더) 병용 필수 — 홈 단독 실행은 구 동작(항상 홈)과 구분 불가한 위양성
         if ProcessInfo.processInfo.environment["TF_TERMINAL_CWD"] == "1" {
@@ -398,6 +407,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                     NSLog("TREE_NETWORK children: [%@]", wc.debugNetworkChildren().joined(separator: ", "))
                 }
+            }
+        }
+        // TF_TREE_COPYPATH=<경로> → 트리 경로 복사 핸들러 구동 → 클립보드 내용 로그(NFC 보정 확인)
+        if let copyPath = ProcessInfo.processInfo.environment["TF_TREE_COPYPATH"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                wc.debugTreeCopyPath(copyPath)
             }
         }
         // TF_TREE_SYNC=1 → (TF_START_DIR 병용) 트리 선택을 네트워크로 보낸 뒤 목록 파일 선택 시

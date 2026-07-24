@@ -107,8 +107,11 @@ final class FileOperationEngine {
         panel.onCancel = { [weak self] in self?.currentTask?.cancel() }
     }
 
-    func run(title: String, items: [Item], in host: NSView, completion: @escaping @MainActor () -> Void) {
-        guard !items.isEmpty else { completion(); return }
+    /// completion의 succeeded = 전 항목 완주(취소·오류 중단이면 false) — 호출측이 "완료 시에만" 후처리를
+    /// 걸 수 있게 (드롭스택 비움이 취소·실패에도 실행되던 결함 교정, 적대검증 2026-07-23)
+    func run(title: String, items: [Item], in host: NSView,
+             completion: @escaping @MainActor (_ succeeded: Bool) -> Void) {
+        guard !items.isEmpty else { completion(true); return }
         let previous = currentTask
         currentTask = Task { [weak self] in
             _ = await previous?.value   // 연산 직렬화 — 순서 섞임 방지
@@ -135,7 +138,7 @@ final class FileOperationEngine {
             show.cancel()
             self.panel.dismiss()
             if let failure { self.reportError(failure) }
-            completion()
+            completion(failure == nil && !Task.isCancelled)
         }
     }
 }

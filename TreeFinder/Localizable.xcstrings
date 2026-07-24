@@ -391,6 +391,16 @@
         }
       }
     },
+    "Copy Here": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "여기로 복사"
+          }
+        }
+      }
+    },
     "Copy Path": {
       "localizations": {
         "ko": {
@@ -987,6 +997,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "이동"
+          }
+        }
+      }
+    },
+    "Move Here": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "여기로 이동"
           }
         }
       }

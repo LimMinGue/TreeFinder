@@ -374,6 +374,29 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         listController?.applyFilter(query)
     }
 
+    /// TF_STACK_DROP=move|copy;<src> — 드롭스택 명시 이동/복사 + 완료 후 비움 검증 / prune;<src> — 소멸 파일 정리 검증
+    func debugStackDrop(mode: String, source: URL) {
+        guard let stack = treeController?.debugDropStack, let list = listController,
+              let dest = list.directory else { return }
+        if mode == "prune" {
+            stack.debugAdd([source, source.deletingLastPathComponent().appendingPathComponent("없는파일.txt")])
+            let before = stack.urls.count
+            stack.pruneMissing()
+            NSLog("TF_STACK_DROP prune before=%d after=%d", before, stack.urls.count)
+            return
+        }
+        stack.debugAdd([source])
+        list.debugRunStackDrop([source], into: dest, move: mode == "move", stack: stack)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            let destFile = dest.appendingPathComponent(source.lastPathComponent)
+            NSLog("TF_STACK_DROP %@ destExists=%d srcExists=%d stackCount=%d",
+                  mode,
+                  FileManager.default.fileExists(atPath: destFile.path) ? 1 : 0,
+                  FileManager.default.fileExists(atPath: source.path) ? 1 : 0,
+                  stack.urls.count)
+        }
+    }
+
     /// TF_DUAL_PANE=3 — 페인 빈 공간 합성 클릭(실제 디스패치 경로)으로 활성 전환 검증 (제작자 제보 2026-07-23)
     func debugClickPaneEmptyArea(_ index: Int) {
         guard panes.indices.contains(index), let window else { return }
@@ -415,6 +438,12 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
     func debugNetworkChildren() -> [String] { treeController?.debugNetworkChildren() ?? [] }
 
     func debugSelectNetworkRow() { treeController?.debugSelectNetworkRow() }   // TF_TREE_SYNC
+
+    /// TF_TREE_COPYPATH=<경로> — 트리 경로 복사 핸들러 구동 후 클립보드 실측 로그
+    func debugTreeCopyPath(_ path: String) {
+        treeController?.debugCopyPath(URL(fileURLWithPath: path))
+        NSLog("TF_TREE_COPYPATH clipboard=%@", NSPasteboard.general.string(forType: .string) ?? "<없음>")
+    }
 
     func debugTreeSelectedName() -> String { treeController?.debugSelectedName() ?? "" }
 
@@ -576,8 +605,8 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         }
         tree.onOpenInNewTab = { [weak self] url in self?.listController?.addTab(showing: url) }
         tree.onOpenInNewWindow = { url in MainWindowController.openNewWindow(directory: url) }
-        tree.onDropFiles = { [weak self] sources, target, forceCopy in
-            self?.listController?.performDrop(sources, into: target, forceCopy: forceCopy)
+        tree.onDropFiles = { [weak self] sources, target, forceCopy, stack in
+            self?.listController?.performDrop(sources, into: target, forceCopy: forceCopy, stackSource: stack)
         }
 
         let split = NSSplitViewController()
