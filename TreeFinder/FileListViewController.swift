@@ -6,17 +6,20 @@ final class TabItemView: NSView {
     private let isActive: Bool
     private let onSelect: (Int) -> Void
     private let onClose: (Int) -> Void
-    private let onDropFiles: (Int, [URL], Bool) -> Void
+    private let onDropFiles: (Int, [URL], Bool, DropStackView?) -> Void
+    private let acceptsDrops: Bool
     private var springTimer: Timer?
 
     init(index: Int, icon tabIcon: NSImage?, title: String, active: Bool, closable: Bool,
+         acceptsDrops: Bool = true,
          onSelect: @escaping (Int) -> Void, onClose: @escaping (Int) -> Void,
-         onDropFiles: @escaping (Int, [URL], Bool) -> Void) {
+         onDropFiles: @escaping (Int, [URL], Bool, DropStackView?) -> Void) {
         self.index = index
         self.isActive = active
         self.onSelect = onSelect
         self.onClose = onClose
         self.onDropFiles = onDropFiles
+        self.acceptsDrops = acceptsDrops
         super.init(frame: .zero)
         registerForDraggedTypes([.fileURL])   // 탭 위 드롭 = 그 탭 폴더로 (원본 1.1.10)
         wantsLayer = true
@@ -97,7 +100,8 @@ final class TabItemView: NSView {
     // MARK: 드래그 스프링 오픈 + 드롭 (원본 1.1.10 — 호버하면 탭이 열리고, 놓으면 그 폴더로)
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard sender.draggingPasteboard.canReadObject(
+        guard acceptsDrops,   // 터미널 탭 등 드롭 미배선 스트립 = 거부(조용히 삼키지 않게 — 적대검증)
+              sender.draggingPasteboard.canReadObject(
             forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) else { return [] }
         springTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: false) { [weak self] _ in
             guard let self else { return }
@@ -117,7 +121,8 @@ final class TabItemView: NSView {
         guard let urls = sender.draggingPasteboard.readObjects(
             forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
             !urls.isEmpty else { return false }
-        onDropFiles(index, urls, NSEvent.modifierFlags.contains(.option))
+        onDropFiles(index, urls, NSEvent.modifierFlags.contains(.option),
+                    sender.draggingSource as? DropStackView)   // 스택 출처 = 이동/복사 메뉴 (§9 ①)
         return true
     }
 }
@@ -127,7 +132,7 @@ final class TabBarView: NSView {
     var onSelectTab: ((Int) -> Void)?
     var onCloseTab: ((Int) -> Void)?
     var onAddTab: (() -> Void)?
-    var onDropOnTab: ((Int, [URL], Bool) -> Void)?
+    var onDropOnTab: ((Int, [URL], Bool, DropStackView?) -> Void)?
     /// 마지막 남은 탭도 ✕로 닫을 수 있는지. 파일 목록은 폴더가 항상 하나 떠 있어야 해서 기본 false
     /// (마지막 탭 닫기 = ⌘W로 창 닫기). 터미널은 0개 상태가 유효해 true (제작자 지시 2026-07-21)
     var allowsClosingLastTab = false
@@ -184,9 +189,10 @@ final class TabBarView: NSView {
             let tab = TabItemView(
                 index: index, icon: item.icon, title: item.title, active: index == active,
                 closable: allowsClosingLastTab || items.count > 1,
+                acceptsDrops: onDropOnTab != nil,   // 터미널 탭 스트립 = 드롭 거부 (적대검증)
                 onSelect: { [weak self] in self?.onSelectTab?($0) },
                 onClose: { [weak self] in self?.onCloseTab?($0) },
-                onDropFiles: { [weak self] in self?.onDropOnTab?($0, $1, $2) })
+                onDropFiles: { [weak self] in self?.onDropOnTab?($0, $1, $2, $3) })
             tab.onDoubleClick = onDoubleClickTab
             stack.addArrangedSubview(tab)
         }
@@ -489,9 +495,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         tabBar.onSelectTab = { [weak self] index in self?.selectTab(index) }
         tabBar.onCloseTab = { [weak self] index in self?.closeTab(index) }
         tabBar.onAddTab = { [weak self] in self?.addTab() }
-        tabBar.onDropOnTab = { [weak self] index, urls, forceCopy in
+        tabBar.onDropOnTab = { [weak self] index, urls, forceCopy, stack in
             guard let self, self.tabURLs.indices.contains(index) else { return }
-            self.performDrop(urls, into: self.tabURLs[index], forceCopy: forceCopy)
+            self.performDrop(urls, into: self.tabURLs[index], forceCopy: forceCopy, stackSource: stack)
         }
 
         let container = NSView()
@@ -1266,7 +1272,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             .filter { !(isMove && $0.deletingLastPathComponent() == directory) }   // 같은 폴더 이동 = no-op
             .map { transferItem(source: $0, into: directory, isMove: isMove) }
         operationEngine.run(title: isMove ? L("Moving items…") : L("Copying items…"),
-                            items: items, in: view) { [weak self] in
+                            items: items, in: view) { [weak self] _ in
             if isMove {
                 self?.cutSourceURLs = []
                 NSPasteboard.general.clearContents()
@@ -1286,7 +1292,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 return { self?.registerUndoCreated(dest, action: L("Duplicate")) }
             }
         }
-        operationEngine.run(title: L("Duplicating items…"), items: items, in: view) { [weak self] in
+        operationEngine.run(title: L("Duplicating items…"), items: items, in: view) { [weak self] _ in
             self?.reloadCurrentDirectory()
         }
     }
@@ -1301,7 +1307,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 return { self?.registerUndoMove(current: trashedURL, original: url, action: L("Move to Trash")) }
             }
         }
-        operationEngine.run(title: L("Moving to Trash…"), items: items, in: view) { [weak self] in
+        operationEngine.run(title: L("Moving to Trash…"), items: items, in: view) { [weak self] _ in
             self?.reloadCurrentDirectory()
         }
     }
@@ -1323,7 +1329,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 return { self?.registerUndoMove(current: dest, original: pair.trashed, action: L("Restore")) }
             }
         }
-        operationEngine.run(title: L("Restoring items…"), items: items, in: view) { [weak self] in
+        operationEngine.run(title: L("Restoring items…"), items: items, in: view) { [weak self] _ in
             self?.reloadCurrentDirectory()
         }
     }
@@ -1358,7 +1364,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             }
             return { self?.registerUndoCreated(dest, action: L("Compress")) }
         }
-        operationEngine.run(title: L("Compressing items…"), items: [item], in: view) { [weak self] in
+        operationEngine.run(title: L("Compressing items…"), items: [item], in: view) { [weak self] _ in
             self?.reloadCurrentDirectory()
         }
     }
@@ -1954,7 +1960,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         let target = (dropOperation == .on && items.indices.contains(row) && items[row].isDirectory)
             ? items[row].url
             : baseDirectory
-        performDrop(sources, into: target, forceCopy: NSEvent.modifierFlags.contains(.option))
+        performDrop(sources, into: target, forceCopy: NSEvent.modifierFlags.contains(.option),
+                    stackSource: info.draggingSource as? DropStackView)
         return true
     }
 
@@ -1964,7 +1971,12 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         return idA.isEqual(idB)
     }
 
-    func performDrop(_ sources: [URL], into target: URL, forceCopy: Bool) {
+    func performDrop(_ sources: [URL], into target: URL, forceCopy: Bool, stackSource: DropStackView? = nil) {
+        // 드롭스택 출처 = 이동/복사 선택 메뉴 경유 (제작자 확정 2026-07-23 — 암묵 이동 금지)
+        if let stack = stackSource {
+            presentStackDropMenu(sources, into: target, stack: stack)
+            return
+        }
         var moving = false
         let items: [FileOperationEngine.Item] = sources.compactMap { source in
             guard source != target else { return nil }
@@ -1975,8 +1987,73 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             return transferItem(source: source, into: target, isMove: isMove)
         }
         operationEngine.run(title: moving ? L("Moving items…") : L("Copying items…"),
-                            items: items, in: view) { [weak self] in
+                            items: items, in: view) { [weak self] _ in
             self?.reloadCurrentDirectory()
+        }
+    }
+
+    /// 드롭스택 드롭 컨텍스트 — 메뉴 항목의 representedObject로 전달 (공유 상태 없음)
+    private final class StackDropRequest: NSObject {
+        let sources: [URL], target: URL, move: Bool
+        weak var stack: DropStackView?
+        init(sources: [URL], target: URL, move: Bool, stack: DropStackView) {
+            self.sources = sources; self.target = target; self.move = move; self.stack = stack
+        }
+    }
+
+    /// 드롭스택 드롭 = "여기로 이동/여기로 복사/취소" 메뉴 (탐색기 우클릭 드래그 규약 — 제작자 컨펌 2026-07-23)
+    private func presentStackDropMenu(_ sources: [URL], into target: URL, stack: DropStackView) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for (title, move) in [(L("Move Here"), true), (L("Copy Here"), false)] {
+            let item = NSMenuItem(title: title, action: #selector(stackDropChosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = StackDropRequest(sources: sources, target: target, move: move, stack: stack)
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: L("Cancel"), action: nil, keyEquivalent: ""))   // 선택 = 닫힘만
+        // 드래그 세션이 완전히 끝난 다음 틱에 커서 위치로 표시 — 세션 진행 중 popUp은 이벤트 루프 충돌
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.view.window else { return }
+            let point = self.view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            menu.popUp(positioning: nil, at: point, in: self.view)
+        }
+    }
+
+    @objc private func stackDropChosen(_ sender: NSMenuItem) {
+        guard let request = sender.representedObject as? StackDropRequest, let stack = request.stack else { return }
+        runStackDrop(request.sources, into: request.target, move: request.move, stack: stack)
+    }
+
+    #if DEBUG
+    /// TF_STACK_DROP — 메뉴 선택 이후 실행 경로를 직접 구동(팝업 메뉴는 자동화 불가)
+    func debugRunStackDrop(_ sources: [URL], into target: URL, move: Bool, stack: DropStackView) {
+        runStackDrop(sources, into: target, move: move, stack: stack)
+    }
+    #endif
+
+    /// 명시 선택된 이동/복사 실행 — 이동은 크로스 볼륨도 이동(FileManager.moveItem = 복사+원본 제거,
+    /// 1.1.10 "다른 볼륨=복사 강등"은 암묵 드래그 한정·명시 선택은 사용자 의사 우선 — QC 위원).
+    /// 완료 시 스택 비움(이동·복사 공통 — 제작자 확정 2026-07-23). 취소·오류 중단 시엔 스택 유지 —
+    /// 부분 이동분은 다음 드래그의 pruneMissing이 정리 (적대검증 반영).
+    private func runStackDrop(_ sources: [URL], into target: URL, move: Bool, stack: DropStackView) {
+        // 같은 폴더 판정은 정규화 경로 비교 — URL ==는 후행 슬래시·NFC/NFD 표기 차이에 오판,
+        // 어긋나면 이동이 충돌 회피 명명을 타고 "이름 2" 개명이 됨 (적대검증 반영)
+        let targetKey = PathPasteboard.normalized(target.standardizedFileURL.path)
+        let items: [FileOperationEngine.Item] = sources.compactMap { source in
+            guard source != target else { return nil }
+            guard !target.path.hasPrefix(source.path + "/") else { return nil }   // 자기 하위로 이동 금지
+            let parentKey = PathPasteboard.normalized(
+                source.deletingLastPathComponent().standardizedFileURL.path)
+            guard !(move && parentKey == targetKey) else { return nil }   // 같은 폴더 이동 = no-op
+            return transferItem(source: source, into: target, isMove: move)
+        }
+        guard !items.isEmpty else { return }   // 전부 no-op = 스택 유지
+        operationEngine.run(title: move ? L("Moving items…") : L("Copying items…"),
+                            items: items, in: view) { [weak self, weak stack] succeeded in
+            self?.reloadCurrentDirectory()
+            if succeeded { stack?.clear() }
         }
     }
 
@@ -2209,7 +2286,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         let target = (dropOperation == .on && items.indices.contains(indexPath.item) && items[indexPath.item].isDirectory)
             ? items[indexPath.item].url
             : baseDirectory
-        performDrop(sources, into: target, forceCopy: NSEvent.modifierFlags.contains(.option))
+        performDrop(sources, into: target, forceCopy: NSEvent.modifierFlags.contains(.option),
+                    stackSource: draggingInfo.draggingSource as? DropStackView)
         return true
     }
 }
