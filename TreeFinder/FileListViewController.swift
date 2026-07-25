@@ -1398,8 +1398,12 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                     self.scheduleSizeRebuild()                       // 크기 정렬 중엔 순서 갱신 (0.3초 코얼레싱)
                 } else if self.viewStyle == .list,                   // 아이콘/갤러리엔 크기 컬럼 없음 — stale 테이블 부분 리로드 금지
                           let row = self.items.firstIndex(where: { $0.url == item.url }) {
-                    self.tableView.reloadData(forRowIndexes: IndexSet(integer: row),
-                                              columnIndexes: IndexSet(integer: 3))
+                    // 컬럼 번호는 반드시 식별자로 조회 — 하드코딩 3은 §27에서 컬럼 3종이 끼어들며
+                    // '최근 사용일'을 가리키게 됐다(크기 칸이 제때 안 그려지던 잠복 회귀).
+                    let sizeColumn = self.tableView.column(withIdentifier: .init(SortKey.size.rawValue))
+                    if sizeColumn >= 0 {   // 상태바 갱신은 계속돼야 하므로 return 아님
+                        self.reloadRows(IndexSet(integer: row), columns: IndexSet(integer: sizeColumn))
+                    }
                 }
                 self.notifyStatus()
             }
@@ -1853,8 +1857,10 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         guard searchResults == nil else { return }   // 검색 결과 중 rename 비활성 (제작자 지시 2026-07-23)
         if viewStyle == .list {
             let row = tableView.selectedRow
+            // makeIfNecessary: true — 방금 스크롤해 보이게 만든 행이라도 셀 뷰 생성은 다음 화면 갱신
+            // 주기에 일어나, false면 편집이 조용히 취소된다(제작자 제보 2026-07-26 실측). 대상은 1행뿐.
             guard row >= 0,
-                  let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSTableCellView,
+                  let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView,
                   let field = cell.textField else { return }
             editingRow = row
             field.isEditable = true
@@ -1916,11 +1922,20 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
-    /// 지정 행만 다시 그리기 — 선택 보존(컬렉션은 reload가 선택을 지울 수 있어 재적용)
-    private func reloadRows(_ rows: IndexSet) {
+    /// 지정 행만 다시 그리기 — 선택 보존(컬렉션은 reload가 선택을 지울 수 있어 재적용).
+    /// **편집 중인 행은 제외**: 행을 다시 그리면 AppKit이 필드 에디터의 first responder를 뺏어
+    /// 인라인 이름변경이 즉시 닫힌다(제작자 제보 2026-07-26 — 새 폴더의 크기 결과가 수십 ms 만에
+    /// 도착해 편집을 죽이던 스택 실측). 보류분은 편집 종료 시 pendingRefresh가 흡수.
+    private func reloadRows(_ rows: IndexSet, columns: IndexSet? = nil) {
+        var rows = rows
+        if let editingRow, rows.contains(editingRow) {
+            rows.remove(editingRow)
+            pendingRefresh = true
+        }
+        guard !rows.isEmpty else { return }
         if viewStyle == .list {
             tableView.reloadData(forRowIndexes: rows,
-                                 columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+                                 columnIndexes: columns ?? IndexSet(integersIn: 0..<tableView.numberOfColumns))
         } else {
             let paths = Set(rows.map { IndexPath(item: $0, section: 0) })
             let selection = collectionView.selectionIndexPaths
@@ -2703,6 +2718,13 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     func debugEditingState() -> String {   // 이름변경 편집 진입 여부 실측(편집 중이면 editingRow≠nil·필드에디터 firstResponder)
         let fr = view.window?.firstResponder
         return "editingRow=\(String(describing: editingRow)) firstResponder=\(fr.map { String(describing: type(of: $0)) } ?? "nil")"
+    }
+    /// TF_NEW_FOLDER — 편집 종료(포커스 이동 = 커밋) 후 보류분(pendingRefresh) 흡수 실측용
+    func debugCommitEditing() { view.window?.makeFirstResponder(tableView) }
+    /// TF_NEW_FOLDER — 편집 중 보류했던 크기가 종료 후 실제로 표시되는지(빈 폴더 = "0바이트" 계열)
+    func debugSizeCellText(named name: String) -> String {
+        guard let index = items.firstIndex(where: { $0.name == name }) else { return "행없음" }
+        return columnText(for: items[index], key: SortKey.size.rawValue) ?? "nil"
     }
 
     func debugSetTag(_ number: Int) {   // TF_SET_TAG — 첫 항목에 색상 태그 적용(목록 행 색 검증)

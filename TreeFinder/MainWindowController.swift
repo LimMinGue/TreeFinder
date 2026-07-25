@@ -440,6 +440,10 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
     func debugNewFolder() { listController?.debugNewFolder() }   // TF_NEW_FOLDER
     func debugNewTextDocument() { listController?.debugNewTextDocument() }   // TF_NEW_TEXTDOC
     func debugEditingState() -> String { listController?.debugEditingState() ?? "nil" }
+    func debugCommitEditing() { listController?.debugCommitEditing() }   // TF_NEW_FOLDER
+    func debugSizeCellText(named name: String) -> String {   // TF_NEW_FOLDER
+        listController?.debugSizeCellText(named: name) ?? "nil"
+    }
 
     func debugSetTag(_ n: Int) { listController?.debugSetTag(n) }   // TF_SET_TAG
 

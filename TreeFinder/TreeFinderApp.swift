@@ -502,7 +502,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if ProcessInfo.processInfo.environment["TF_NEW_FOLDER"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { wc.debugNewFolder() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                // 크기 결과는 수십 ms 만에 도착 — 그 뒤에도 편집이 살아 있어야 한다(제작자 제보 2026-07-26)
+                NSLog("NEW_FOLDER %@", wc.debugEditingState())   // editingRow≠nil·필드에디터면 이름변경 진입 성공
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-newfolder.png")
+            }
+            // 편집 종료(포커스 이동 = 커밋) → 편집 중 보류했던 크기 갱신이 흡수돼 표시되는지 실측
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { wc.debugCommitEditing() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.8) {
+                NSLog("NEW_FOLDER afterCommit %@ size=%@", wc.debugEditingState(),
+                      wc.debugSizeCellText(named: "untitled folder"))
             }
         }
         // TF_NEW_TEXTDOC=1 → (TF_START_DIR 병용) 새 텍스트 문서가 이름변경 상태로 생성되는지 실측 (제작자 지시 2026-07-25)
