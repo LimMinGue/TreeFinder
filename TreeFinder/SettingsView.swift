@@ -9,6 +9,8 @@ enum SettingsKeys {
     static let terminalTheme = "TerminalTheme"
     static let alwaysExtensions = "AlwaysShowExtensions"
     static let showHidden = "ShowHiddenFiles"
+    static let iconSize = "IconGridSize"   // 아이콘 뷰 아이콘 한 변(pt) — 슬라이더 (제작자 지시 2026-07-25)
+    static let hiddenColumns = "HiddenListColumns"   // 파일 목록 숨긴 컬럼 키 목록 — 헤더 우클릭 (제작자 지시 2026-07-25)
     static let expandToOpenFolder = "ExpandToOpenFolder"
     // 마지막 세션(탭 경로들·활성 탭) — 재실행 시 복원 (제작자 지시 2026-07-17)
     static let lastTabs = "LastSessionTabs"

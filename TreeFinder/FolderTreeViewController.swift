@@ -253,6 +253,14 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
             self.outlineView.reloadItem(self.locationsGroup, reloadChildren: true)
             self.outlineView.expandItem(self.locationsGroup)
         }
+        // 착탈식 볼륨 스냅숏 준비/변화 → 볼륨 행 재렌더(⏏ 버튼 표시) (제작자 지시 2026-07-25)
+        NotificationCenter.default.addObserver(forName: VolumeMonitor.changed, object: nil, queue: .main) {
+            [weak self] _ in
+            guard let self else { return }
+            // 볼륨 노드 행만 재렌더(확장 보존) — 새 볼륨 마운트/언마운트는 위 networkLocationsChanged가 재구성
+            for node in self.localLocations { self.outlineView.reloadItem(node) }
+        }
+        _ = VolumeMonitor.shared   // 스냅숏 부트스트랩(첫 refresh 트리거 — 옵저버 등록 후)
         // 발견 호스트 변화 → 네트워크 그룹만 갱신 (제작자 지시 2026-07-23 — 트리에도 발견 목록)
         NotificationCenter.default.addObserver(forName: .networkHostsChanged, object: nil, queue: .main) {
             [weak self] _ in
@@ -429,6 +437,18 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
             cell.alphaValue = 1
             return cell
         }
+        // 착탈식 볼륨(USB·외장·디스크이미지) = 네트워크와 동일 ⏏ 셀 재사용 (제작자 지시 2026-07-25, 규칙 4).
+        // 판정은 VolumeMonitor 메모리 조회(메인 stat 0 — §3/§6). 부트/Data는 판정식에서 제외돼 여기 안 옴.
+        if let node = item as? FolderNode, VolumeMonitor.shared.isEjectable(node.url) {
+            let cell = SidebarActionCellView.make(outlineView, identifier: "volumeCell")
+            cell.configure(name: node.name,
+                           icon: NSImage(systemSymbolName: "externaldrive", accessibilityDescription: nil),
+                           actionSymbol: "eject.fill", actionLabel: L("Eject")) {
+                [weak self] in self?.ejectVolume(at: node.url)
+            }
+            cell.alphaValue = 1
+            return cell
+        }
         let cell = CellFactory.iconText(outlineView, identifier: .init("folderCell"))
         if let node = item as? FolderNode {
             cell.textField?.stringValue = node.name
@@ -566,6 +586,17 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
             return "?"
         }
     }
+    /// TF_EJECT_TEST — 착탈식 볼륨 노드가 실제로 ⏏ 버튼 셀(SidebarActionCellView)로 렌더되는지 결정적 검증
+    /// (사이드바 비브런시라 뷰 렌더 스냅숏이 백지 — 셀 실체를 직접 조회, decisions §18 한계 우회).
+    func debugEjectVolume(_ path: String) { ejectVolume(at: URL(fileURLWithPath: path)) }   // TF_EJECT_DO
+    func debugEjectTreeInfo() -> [String] {
+        localLocations.map { node in
+            let row = outlineView.row(forItem: node)
+            let view = row >= 0 ? outlineView.view(atColumn: 0, row: row, makeIfNecessary: true) : nil
+            let isAction = view is SidebarActionCellView
+            return "\(node.name): ejectable=\(VolumeMonitor.shared.isEjectable(node.url)) cell=\(isAction ? "⏏SidebarActionCell" : "일반")"
+        }
+    }
     #endif
 
     @objc private func rowClicked() {
@@ -649,6 +680,10 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         menu.addItem(.separator())
 
         if item is FolderNode {
+            if VolumeMonitor.shared.isEjectable(url) {   // 착탈식 볼륨 = 추출 (제작자 지시 2026-07-25)
+                menu.addItem(entry(L("Eject"), "eject", #selector(ejectVolumeMenu(_:))))
+                menu.addItem(.separator())
+            }
             let add = entry(L("Add to Favorites"), "pin", #selector(addFavorite(_:)))
             add.isEnabled = !favorites.contains { $0.url == url }
             menu.addItem(add)
@@ -702,15 +737,21 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         eject(network)
     }
 
+    @objc private func ejectVolumeMenu(_ sender: NSMenuItem) {   // 착탈식 볼륨 폴더 메뉴 (제작자 지시 2026-07-25)
+        guard let url = sender.representedObject as? URL else { return }
+        ejectVolume(at: url)
+    }
+
+    /// 트리 인라인 ⏏ 버튼·컨텍스트 메뉴 공용 — 추출 실행은 VolumeEjector 단일 합류점(규칙 4).
+    private func ejectVolume(at url: URL) {
+        VolumeEjector.eject(url, presenter: view.window)
+    }
+
     /// 인라인 ⏏ 버튼과 컨텍스트 메뉴 공용 — 조용한 실패 금지 (원본 1.3.1)
+    /// 추출 실행은 VolumeEjector 단일 합류점(오프메인·인플라이트 가드, §3 — 제작자 지시 2026-07-25).
     private func eject(_ network: NetworkLocationItem) {
         guard let mountPoint = network.mountPoint else { return }
-        do {
-            try NSWorkspace.shared.unmountAndEjectDevice(at: mountPoint)
-        } catch {
-            guard let window = view.window else { return }
-            NSAlert(error: error).beginSheetModal(for: window)
-        }
+        VolumeEjector.eject(mountPoint, presenter: view.window)
     }
 
     @objc private func forgetNetwork(_ sender: NSMenuItem) {

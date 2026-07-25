@@ -320,6 +320,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         switch style {
         case .icons: return 0
         case .list: return 1
+        case .columns: return 2
         case .gallery: return 3
         }
     }
@@ -328,6 +329,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         let style: ViewStyle
         switch sender.selectedSegment {
         case 0: style = .icons
+        case 2: style = .columns
         case 3: style = .gallery
         default: style = .list
         }
@@ -430,10 +432,15 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
     }
 
     func debugNewFolder() { listController?.debugNewFolder() }   // TF_NEW_FOLDER
+    func debugNewTextDocument() { listController?.debugNewTextDocument() }   // TF_NEW_TEXTDOC
+    func debugEditingState() -> String { listController?.debugEditingState() ?? "nil" }
 
     func debugSetTag(_ n: Int) { listController?.debugSetTag(n) }   // TF_SET_TAG
 
     func debugExpandNetwork() { treeController?.debugExpandNetwork() }   // TF_TREE_NETWORK
+    func debugEjectTreeInfo() -> [String] { treeController?.debugEjectTreeInfo() ?? [] }   // TF_EJECT_TEST
+    func debugEjectVolume(_ path: String) { treeController?.debugEjectVolume(path) }   // TF_EJECT_DO
+    func debugCurrentDirectory() -> String { listController?.directory?.path ?? "nil" }
 
     func debugNetworkChildren() -> [String] { treeController?.debugNetworkChildren() ?? [] }
 
@@ -448,6 +455,15 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
     func debugTreeSelectedName() -> String { treeController?.debugSelectedName() ?? "" }
 
     func debugSelectFirstFile() { listController?.debugSelectFirstItem() }   // TF_TREE_SYNC — 목록 첫 항목 선택
+    func debugRename() { listController?.renameSelected(nil) }   // TF_ICON_RENAME — 인라인 이름변경 진입
+    func debugTypeSelectProbe() { listController?.debugTypeSelectProbe() }   // TF_TYPESELECT
+    func debugQuickLook() { listController?.debugQuickLook() }   // TF_QUICKLOOK
+    func debugQuickLookState() -> String { listController?.debugQuickLookState() ?? "nil" }
+    func debugQuickLookCloseViaSpace() -> Bool { listController?.debugQuickLookCloseViaSpace() ?? false }
+    func debugColumnHeaderMenu() -> [String] { listController?.debugColumnHeaderMenu() ?? [] }   // TF_COLUMN_MENU
+    func debugShowColumn(_ key: String) { listController?.debugShowColumn(key) }
+    func debugBrowserSelectFolder() { listController?.debugBrowserSelectFolder() }   // TF_COLUMNS
+    func debugBrowserSelection() -> String { listController?.debugBrowserSelection() ?? "nil" }
 
     func debugSelectNotifyCount() -> Int { listController?.debugSelectNotifyCount ?? -1 }   // TF_FLICKER_TEST
 
@@ -722,13 +738,12 @@ extension MainWindowController: NSToolbarDelegate {
             item.menu = menu
             return item
         case .viewSwitcher:
-            // Finder식 뷰 전환 세그먼트 — 0=아이콘·1=리스트·3=갤러리, 2=컬럼만 비활성(정직한 목업)
+            // Finder식 뷰 전환 세그먼트 — 0=아이콘·1=리스트·2=컬럼·3=갤러리 (제작자 지시 2026-07-25: 컬럼 활성화)
             let symbols = ["square.grid.2x2", "list.bullet", "rectangle.split.3x1", "squares.below.rectangle"]
             let segmented = NSSegmentedControl(
                 images: symbols.compactMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) },
                 trackingMode: .selectOne, target: self, action: #selector(viewSwitcherChanged(_:)))
             segmented.selectedSegment = Self.segmentIndex(of: listController?.viewStyle ?? .list)
-            segmented.setEnabled(false, forSegment: 2)
             viewSegmented = segmented
             let item = NSToolbarItem(itemIdentifier: id)
             item.view = segmented

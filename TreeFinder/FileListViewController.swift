@@ -1,4 +1,5 @@
 import AppKit
+import Quartz   // QLPreviewPanel — 스페이스바 Quick Look 팝업 (제작자 지시 2026-07-25)
 
 /// 탭 하나 — 폴더 아이콘 + 이름 + ✕, 활성 탭은 얇은 테두리 필(pill) (원본 탭 레퍼런스 기준)
 final class TabItemView: NSView {
@@ -221,10 +222,14 @@ final class TagRowView: NSTableRowView {
 
 /// 리스트 테이블 — Finder 키 규약(제작자 지시 2026-07-23): Enter=이름변경, ⌘↓=열기/폴더 진입.
 /// 화살표 선택·type-select는 NSTableView 기본 동작에 위임(super).
-final class TFTableView: NSTableView {
+/// type-select는 NSTextInputClient 경로로 한글 완성형 지원 (제작자 지시 2026-07-25, 조사 반영 — 컬렉션 뷰와 통일)
+final class TFTableView: NSTableView, NSTextInputClient {
     var onRename: (() -> Void)?
     var onOpen: (() -> Void)?
     var onMouseDown: (() -> Void)?
+    var onQuickLook: (() -> Void)?   // 스페이스바 = Quick Look (제작자 지시 2026-07-25)
+    var onTypeSelect: ((String) -> Void)? { didSet { typeSelect.onQuery = onTypeSelect } }
+    let typeSelect = TypeSelectController()
     // 빈 공간 클릭(선택 무변화)도 듀얼 페인 활성 승격 — super(선택 변화 통지) "이전"이어야
     // onSelect의 활성 페인 가드가 새 활성 기준으로 통과한다 (제작자 제보 2026-07-23)
     override func mouseDown(with event: NSEvent) {
@@ -232,31 +237,61 @@ final class TFTableView: NSTableView {
         super.mouseDown(with: event)
     }
     override func keyDown(with event: NSEvent) {
-        let cmd = event.modifierFlags.contains(.command)
-        let code = Int(event.keyCode)
-        if (code == 36 || code == 76), !cmd, selectedRow >= 0 {   // Return·키패드 Enter → 이름변경
-            onRename?(); return
+        // 조합 중이 아닐 때만 특수키 가로채기 — 조합 중 Return=완성형 커밋 등은 IME 우선
+        if !typeSelect.hasMarked {
+            let cmd = event.modifierFlags.contains(.command)
+            let code = Int(event.keyCode)
+            if (code == 36 || code == 76), !cmd, selectedRow >= 0 {   // Return·키패드 Enter → 이름변경
+                onRename?(); return
+            }
+            if code == 125, cmd, selectedRow >= 0 {                   // ⌘↓ → 열기/폴더 진입
+                onOpen?(); return
+            }
+            if code == 49, !cmd, !event.modifierFlags.contains(.option) {   // Space → Quick Look (Finder 규약)
+                onQuickLook?(); return
+            }
         }
-        if code == 125, cmd, selectedRow >= 0 {                   // ⌘↓ → 열기/폴더 진입
-            onOpen?(); return
-        }
+        // 인쇄 문자·조합 중 = IME 경로(완성형 수신), 나머지(화살표 등) = super 네비게이션 (조사 §Q3)
+        if typeSelect.shouldRoute(event), inputContext?.handleEvent(event) == true { return }
         super.keyDown(with: event)
     }
+
+    // NSTextInputClient — 컬렉션 뷰와 동일 최소 구현(규칙 4: 로직은 TypeSelectController 공용)
+    func insertText(_ string: Any, replacementRange: NSRange) { typeSelect.insert(TypeSelectController.string(from: string)) }
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        typeSelect.setMarked(TypeSelectController.string(from: string))
+    }
+    func unmarkText() { typeSelect.unmark() }
+    func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
+    func markedRange() -> NSRange { typeSelect.markedRange }
+    func hasMarkedText() -> Bool { typeSelect.hasMarked }
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? { nil }
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        guard let window else { return .zero }
+        return window.convertToScreen(convert(bounds, to: nil))
+    }
+    func characterIndex(for point: NSPoint) -> Int { 0 }
 }
 
 final class FileListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
                                     NSMenuDelegate, NSTextFieldDelegate,
-                                    NSCollectionViewDataSource, NSCollectionViewDelegate {
+                                    NSCollectionViewDataSource, NSCollectionViewDelegate,
+                                    NSBrowserDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
 
     func controlTextDidEndEditing(_ notification: Notification) {
         guard let field = notification.object as? NSTextField, let row = editingRow else { return }
         editingRow = nil
         field.isEditable = false
         field.delegate = nil
+        let iconItem = editingIconItem   // 아이콘 뷰 인라인 rename (제작자 지시 2026-07-25)
+        editingIconItem = nil
+        iconItem?.endEditing()
         let hadPendingRefresh = pendingRefresh   // EditGuard 보류분 — 어느 경로로 끝나도 흡수
         pendingRefresh = false
+        // 아이콘 경로는 no-op/오류에도 항상 리로드 — 재구성이 라벨을 올바로 되돌린다(list는 flicker 회피로 리로드 생략)
         guard items.indices.contains(row) else {
-            if hadPendingRefresh { reloadCurrentDirectory() }
+            if hadPendingRefresh || iconItem != nil { reloadCurrentDirectory() }
             return
         }
         let item = items[row]
@@ -264,15 +299,15 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         // 표시명('/')을 디스크명(':')으로 변환해 비교 — 안 그러면 '개인/가족' 표시 == '개인:가족' 디스크가
         // 서로 다르다고 오판돼, 변경 없는 편집도 '이미 존재' 오류를 낸다 (제작자 지시 2026-07-23)
         guard !newName.isEmpty, Self.diskName(fromDisplay: newName) != item.name else {
-            field.stringValue = Self.displayName(fromDisk: item.name)
-            if hadPendingRefresh { reloadCurrentDirectory() }
+            if iconItem == nil { field.stringValue = Self.displayName(fromDisk: item.name) }
+            if hadPendingRefresh || iconItem != nil { reloadCurrentDirectory() }
             return
         }
         do {
             let renamed = try Self.posixRename(item.url, toName: newName)
             registerRenameUndo(current: renamed, originalName: item.name)
         } catch {
-            field.stringValue = Self.displayName(fromDisk: item.name)
+            if iconItem == nil { field.stringValue = Self.displayName(fromDisk: item.name) }
             reportError(error)
         }
         reloadCurrentDirectory()
@@ -326,6 +361,13 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     private let tableScroll = NSScrollView()
     private let collectionView = TFCollectionView()
     private let collectionScroll = NSScrollView()
+    // 아이콘 크기 슬라이더 — icons 모드 전용 우하단 플로팅(Finder 규약, 제작자 지시 2026-07-25)
+    private let iconSizeBar = NSVisualEffectView()
+    private let iconSizeSlider = NSSlider()
+    // 컬럼 뷰 = 네이티브 NSBrowser(Finder Miller 컬럼, 제작자 지시 2026-07-25). ponytail: 계단식 리스트 자작 대신 플랫폼 기본.
+    private let browser = NSBrowser()
+    private var browserChildrenCache: [URL: [URL]] = [:]   // 폴더 URL → 자식 URL(정렬됨) — 컬럼 재리스팅 최소화
+    private var browserItemByURL: [URL: FileItem] = [:]     // URL → FileItem(표시·leaf 판정)
     private let galleryBox = NSView()
     private let galleryPreview = PassivePreviewView(frame: .zero, style: .normal)!
     private let galleryCaption = NSTextField(labelWithString: "")
@@ -398,11 +440,17 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     override func loadView() {
         // 컬럼 구성 = 제작자 Finder 습관 기준(decisions §1): 이름·수정일·생성일·크기·종류
+        // + 헤더 우클릭 선택 컬럼(최근 사용일·추가된 날짜·태그, 기본 숨김 — 제작자 지시 2026-07-25)
         addColumn(.name, title: L("Name"), width: 280, minWidth: 160)
         addColumn(.dateModified, title: L("Date Modified"), width: 150, minWidth: 100)
         addColumn(.dateCreated, title: L("Date Created"), width: 150, minWidth: 100)
+        addColumn(.dateLastOpened, title: L("Date Last Opened"), width: 150, minWidth: 100)
+        addColumn(.dateAdded, title: L("Date Added"), width: 150, minWidth: 100)
         addColumn(.size, title: L("Size"), width: 80, minWidth: 60)
         addColumn(.kind, title: L("Kind"), width: 140, minWidth: 80)
+        addColumn(.tags, title: L("Tags"), width: 120, minWidth: 80)
+        applyColumnVisibility()   // 저장된 표시 상태(기본: 최근사용일·추가된날짜·태그 숨김)
+        setupColumnHeaderMenu()   // 헤더 우클릭 = 컬럼 표시/숨김 메뉴
 
         tableView.dataSource = self
         tableView.delegate = self
@@ -414,6 +462,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         tableView.onRename = { [weak self] in self?.renameSelected(nil) }   // Enter = 이름변경 (Finder 규약)
         tableView.onOpen = { [weak self] in self?.openSelected() }          // ⌘↓ = 열기/진입 (Finder 규약)
         tableView.onMouseDown = { [weak self] in self?.onActivate?() }      // 빈 공간 클릭 = 페인 활성
+        tableView.onTypeSelect = { [weak self] query in self?.typeSelect(query) }   // 한글 완성형 IME 경로 (제작자 지시 2026-07-25)
+        tableView.onQuickLook = { [weak self] in self?.toggleQuickLook() }   // 스페이스바 Quick Look
 
         tableView.sortDescriptors = [NSSortDescriptor(key: SortKey.name.rawValue, ascending: true)]
         let contextMenu = NSMenu()
@@ -433,6 +483,13 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         // 네트워크 브라우즈 중 발견 결과 증감 → 목록 재구성 (워게임 network_browse)
         NotificationCenter.default.addObserver(forName: .networkHostsChanged, object: nil, queue: .main) {
             [weak self] _ in self?.reloadNetworkItems()
+        }
+        // 볼륨 추출/언마운트(트리 ⏏·목록 메뉴·Finder 외부) 시 현재 폴더가 그 볼륨 하위면 홈으로 이탈 (제작자 지시 2026-07-25)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didUnmountNotification, object: nil, queue: .main) { [weak self] note in
+            guard let self,
+                  let volume = note.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL else { return }
+            self.navigateAwayIfInside(volume)
         }
 
         tableScroll.documentView = tableView
@@ -456,6 +513,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         collectionView.setDraggingSourceOperationMask([.copy, .move], forLocal: true)
         collectionView.onDoubleClick = { [weak self] in self?.openSelected() }
         collectionView.onTypeSelect = { [weak self] prefix in self?.typeSelect(prefix) }
+        collectionView.onQuickLook = { [weak self] in self?.toggleQuickLook() }   // 스페이스바 Quick Look
         collectionView.onMouseDown = { [weak self] in self?.onActivate?() }   // 빈 공간 클릭 = 페인 활성
         collectionScroll.documentView = collectionView
         collectionScroll.hasVerticalScroller = true
@@ -533,6 +591,69 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             galleryCaption.leadingAnchor.constraint(equalTo: galleryBox.leadingAnchor, constant: 16),
             galleryCaption.trailingAnchor.constraint(equalTo: galleryBox.trailingAnchor, constant: -16),
         ])
+        // 아이콘 크기 슬라이더 — icons 모드 전용 우하단 플로팅 캡슐 (제작자 지시 2026-07-25, Finder 규약)
+        iconSizeBar.material = .popover
+        iconSizeBar.blendingMode = .withinWindow
+        iconSizeBar.state = .active
+        iconSizeBar.wantsLayer = true
+        iconSizeBar.layer?.cornerRadius = 7
+        iconSizeBar.isHidden = true
+        iconSizeBar.translatesAutoresizingMaskIntoConstraints = false
+        iconSizeSlider.minValue = Double(IconGridMetrics.minSide)
+        iconSizeSlider.maxValue = Double(IconGridMetrics.maxSide)
+        iconSizeSlider.doubleValue = Double(IconGridMetrics.side)
+        iconSizeSlider.isContinuous = true
+        iconSizeSlider.controlSize = .small
+        iconSizeSlider.target = self
+        iconSizeSlider.action = #selector(iconSizeChanged(_:))
+        iconSizeSlider.translatesAutoresizingMaskIntoConstraints = false
+        let smallGlyph = NSImageView()
+        let largeGlyph = NSImageView()
+        smallGlyph.image = NSImage(systemSymbolName: "square.fill", accessibilityDescription: nil)
+        largeGlyph.image = NSImage(systemSymbolName: "square.fill", accessibilityDescription: nil)
+        smallGlyph.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 8, weight: .regular)
+        largeGlyph.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        smallGlyph.contentTintColor = .secondaryLabelColor
+        largeGlyph.contentTintColor = .secondaryLabelColor
+        for glyph in [smallGlyph, largeGlyph] { glyph.translatesAutoresizingMaskIntoConstraints = false }
+        iconSizeBar.addSubview(smallGlyph)
+        iconSizeBar.addSubview(iconSizeSlider)
+        iconSizeBar.addSubview(largeGlyph)
+        container.addSubview(iconSizeBar)
+        NSLayoutConstraint.activate([
+            iconSizeBar.trailingAnchor.constraint(equalTo: collectionScroll.trailingAnchor, constant: -16),
+            iconSizeBar.bottomAnchor.constraint(equalTo: collectionScroll.bottomAnchor, constant: -12),
+            iconSizeBar.heightAnchor.constraint(equalToConstant: 26),
+            smallGlyph.leadingAnchor.constraint(equalTo: iconSizeBar.leadingAnchor, constant: 9),
+            smallGlyph.centerYAnchor.constraint(equalTo: iconSizeBar.centerYAnchor),
+            iconSizeSlider.leadingAnchor.constraint(equalTo: smallGlyph.trailingAnchor, constant: 7),
+            iconSizeSlider.centerYAnchor.constraint(equalTo: iconSizeBar.centerYAnchor),
+            iconSizeSlider.widthAnchor.constraint(equalToConstant: 92),
+            largeGlyph.leadingAnchor.constraint(equalTo: iconSizeSlider.trailingAnchor, constant: 7),
+            largeGlyph.trailingAnchor.constraint(equalTo: iconSizeBar.trailingAnchor, constant: -9),
+            largeGlyph.centerYAnchor.constraint(equalTo: iconSizeBar.centerYAnchor),
+        ])
+        // 컬럼 뷰(NSBrowser) — 목록 영역 전체, 기본 숨김. 계단식 탐색은 네이티브 (제작자 지시 2026-07-25)
+        browser.translatesAutoresizingMaskIntoConstraints = false
+        browser.isHidden = true
+        browser.delegate = self
+        browser.target = self
+        browser.action = #selector(browserClicked(_:))
+        browser.doubleAction = #selector(browserDoubleClicked(_:))
+        browser.hasHorizontalScroller = true
+        browser.autohidesScroller = true
+        browser.allowsEmptySelection = true
+        browser.allowsMultipleSelection = true
+        browser.separatesColumns = true
+        browser.takesTitleFromPreviousColumn = false
+        browser.menu = contextMenu   // 파일 컨텍스트 메뉴 공유(menuNeedsUpdate가 컬럼 분기)
+        container.addSubview(browser)
+        NSLayoutConstraint.activate([
+            browser.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
+            browser.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            browser.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            browser.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
         // icons: 컬렉션이 목록 영역 전체 / gallery: 상단 갤러리 박스 + 하단 필름스트립(76pt)
         gridModeConstraints = [
             collectionScroll.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
@@ -552,7 +673,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     private static func makeGridLayout() -> NSCollectionViewFlowLayout {
         let layout = LeftAlignedFlowLayout()
-        layout.itemSize = NSSize(width: 100, height: 112)
+        layout.itemSize = IconGridMetrics.itemSize(IconGridMetrics.side)   // 슬라이더 값 (제작자 지시 2026-07-25)
         layout.minimumInteritemSpacing = 14
         layout.minimumLineSpacing = 10
         layout.sectionInset = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
@@ -569,6 +690,244 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         return layout
     }
 
+    /// 아이콘 크기 슬라이더 — 드래그 중 즉시 리사이즈(상수만·선택 보존), 놓으면 새 해상도 썸네일 갱신 (제작자 지시 2026-07-25).
+    @objc private func iconSizeChanged(_ sender: NSSlider) {
+        let side = CGFloat(sender.doubleValue.rounded())
+        UserDefaults.standard.set(Double(side), forKey: SettingsKeys.iconSize)
+        guard viewStyle == .icons,
+              let layout = collectionView.collectionViewLayout as? NSCollectionViewFlowLayout else { return }
+        layout.itemSize = IconGridMetrics.itemSize(side)
+        for case let cell as FileIconItem in collectionView.visibleItems() { cell.updateGridSide(side) }
+        layout.invalidateLayout()
+        if NSApp.currentEvent?.type == .leftMouseUp {   // 드래그 종료 → 새 해상도 썸네일(선택 보존)
+            let selection = collectionView.selectionIndexPaths
+            collectionView.reloadData()
+            collectionView.selectionIndexPaths = selection
+        }
+    }
+
+    // MARK: 컬럼 뷰 (NSBrowser — Finder Miller 컬럼, 제작자 지시 2026-07-25)
+
+    /// 루트 = 현재 폴더로 브라우저 재적재. 캐시 비움 후 컬럼 0부터 다시 그림.
+    private func reloadBrowser() {
+        browserChildrenCache.removeAll()
+        browserItemByURL.removeAll()
+        browser.loadColumnZero()
+    }
+
+    /// 폴더 자식 URL(폴더 우선 자연 정렬·숨김 설정 준수) — 컬럼 델리게이트 반복 호출 캐시.
+    /// ponytail: 동기 리스팅(로컬 전제). 비로컬 볼륨 지원은 VolumeLanes 후속.
+    private func browserChildURLs(of folder: URL) -> [URL] {
+        if let cached = browserChildrenCache[folder] { return cached }
+        let showHidden = UserDefaults.standard.bool(forKey: SettingsKeys.showHidden)
+        let options: FileManager.DirectoryEnumerationOptions = showHidden ? [] : [.skipsHiddenFiles]
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: DirectoryLister.resourceKeys, options: options)) ?? []
+        let items = DirectoryLister.sorted(urls.map(DirectoryLister.item(for:)))
+        for item in items { browserItemByURL[item.url] = item }
+        let childURLs = items.map(\.url)
+        browserChildrenCache[folder] = childURLs
+        return childURLs
+    }
+
+    private func browserItem(_ url: URL) -> FileItem {
+        browserItemByURL[url] ?? DirectoryLister.item(for: url)
+    }
+
+    private func selectedBrowserURL() -> URL? {
+        guard let indexPath = browser.selectionIndexPath else { return nil }
+        return browser.item(at: indexPath) as? URL
+    }
+
+    @objc private func browserClicked(_ sender: NSBrowser) {
+        onActivate?()   // 듀얼 페인 활성 승격 (테이블·컬렉션과 대칭)
+        let url = selectedBrowserURL()
+        onSelect?(url.map { browserItem($0) })   // 미리보기·경로 바·상태바 갱신
+        notifyStatus()
+        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
+            QLPreviewPanel.shared().reloadData()   // 컬럼 뷰에서도 QL이 선택 따라감
+        }
+    }
+
+    @objc private func browserDoubleClicked(_ sender: NSBrowser) {
+        guard let url = selectedBrowserURL() else { return }
+        if browserItem(url).isDirectory {
+            show(directory: url)   // 폴더 = 루트 변경(진입) — 리스트/아이콘과 동일 탐색
+        } else {
+            openSelected()   // 파일 = 열기(selectedURLs 컬럼 인지 경유)
+        }
+    }
+
+    // NSBrowserDelegate (item-based) — 노드 = 파일 URL
+    func rootItem(for browser: NSBrowser) -> Any? { directory }
+    func browser(_ browser: NSBrowser, numberOfChildrenOfItem item: Any?) -> Int {
+        guard let folder = (item as? URL) ?? directory else { return 0 }
+        return browserChildURLs(of: folder).count
+    }
+    func browser(_ browser: NSBrowser, child index: Int, ofItem item: Any?) -> Any {
+        let folder = (item as? URL) ?? directory ?? FileManager.default.homeDirectoryForCurrentUser
+        let children = browserChildURLs(of: folder)
+        return children.indices.contains(index) ? children[index] : folder
+    }
+    func browser(_ browser: NSBrowser, isLeafItem item: Any?) -> Bool {
+        guard let url = item as? URL else { return false }
+        return !browserItem(url).isDirectory   // 폴더만 다음 컬럼(패키지=파일=leaf)
+    }
+    func browser(_ browser: NSBrowser, objectValueForItem item: Any?) -> Any? {
+        guard let url = item as? URL else { return "" }
+        return Self.displayName(fromDisk: browserItem(url).name)   // '개인:가족' → '개인/가족' 표시
+    }
+    func browser(_ browser: NSBrowser, willDisplayCell cell: Any, atRow row: Int, column: Int) {
+        guard let browserCell = cell as? NSBrowserCell,
+              let url = browser.item(atRow: row, inColumn: column) as? URL else { return }
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        icon.size = NSSize(width: 16, height: 16)
+        browserCell.image = icon
+    }
+
+    #if DEBUG
+    func debugQuickLook() {   // TF_QUICKLOOK — 첫 항목 선택 후 스페이스바 Quick Look 토글
+        NSApp.activate(ignoringOtherApps: true)
+        view.window?.makeFirstResponder(tableView)
+        setActiveSelection(IndexSet(integer: 0), scrollToFirst: false)
+        selectionDidSync()
+        toggleQuickLook()
+    }
+    func debugQuickLookState() -> String {
+        let panel = QLPreviewPanel.shared()
+        let visible = QLPreviewPanel.sharedPreviewPanelExists() && (panel?.isVisible ?? false)
+        let item = (panel?.currentPreviewItem as? NSURL)?.lastPathComponent ?? "nil"
+        return "visible=\(visible) item=\(item)"
+    }
+    /// 열린 패널에 Space를 handle로 전달 = 닫기 경로. return true(소비)면 목록으로 안 되튕겨 이중 토글 없음.
+    func debugQuickLookCloseViaSpace() -> Bool {
+        guard let panel = QLPreviewPanel.shared(),
+              let space = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: 0, windowNumber: view.window?.windowNumber ?? 0, context: nil,
+                characters: " ", charactersIgnoringModifiers: " ", isARepeat: false, keyCode: 49)
+        else { return false }
+        return previewPanel(panel, handle: space)   // true = Space 소비(되튕김 차단)
+    }
+    /// TF_COLUMN_MENU — 헤더 우클릭 메뉴 구조(캡처 배치·토글/회색/체크) + 컬럼 토글 렌더 검증
+    func debugColumnHeaderMenu() -> [String] {
+        updateHeaderColumnMenuStates()
+        return (headerColumnMenu?.items ?? []).map { item in
+            let toggle = item.representedObject != nil
+            return "\(item.title)[\(toggle ? "토글" : "회색")\(item.isEnabled ? "" : "·비활성")\(item.state == .on ? "·✓" : "")]"
+        }
+    }
+    func debugShowColumn(_ key: String) {
+        tableView.tableColumns.first(where: { $0.identifier.rawValue == key })?.isHidden = false
+    }
+    /// TF_TYPESELECT — 매처 실측(완성형 prefix·초성·라틴) + inputContext 존재 확인.
+    /// IME 실입력은 헤드리스 재현 불가(조사 §검증) → 매처 로직과 입력 클라이언트 준비만 검증.
+    func debugTypeSelectProbe() {
+        for query in ["강", "고", "ㄱ", "app", "ban"] {
+            typeSelect(query)
+            let name = activeSelectionIndexes().first.flatMap { items.indices.contains($0) ? items[$0].name : nil } ?? "nil"
+            NSLog("TYPESELECT query=%@ selected=%@", query, name)
+        }
+        view.window?.makeFirstResponder(tableView)
+        NSLog("TYPESELECT tableInputContext=%@ collectionInputContext=%@",
+              tableView.inputContext != nil ? "yes" : "no",
+              collectionView.inputContext != nil ? "yes" : "no")
+        // 합성 아래 화살표 → IME가 안 삼키고 super 네비게이션 보존 (조사 §함정1 회귀)
+        setActiveSelection(IndexSet(integer: 0), scrollToFirst: false)
+        if let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .function,
+                timestamp: 0, windowNumber: view.window?.windowNumber ?? 0, context: nil,
+                characters: "\u{F701}", charactersIgnoringModifiers: "\u{F701}", isARepeat: false, keyCode: 125) {
+            tableView.keyDown(with: down)
+        }
+        NSLog("TYPESELECT arrowDown selectedRow=%d (1 기대 — 네비게이션 보존)", tableView.selectedRow)
+        // 합성 keyDown 'b' → keyDown→inputContext.handleEvent→insertText→매처→banana (라틴 실키 경로 회귀)
+        setActiveSelection(IndexSet(), scrollToFirst: false)
+        tableView.typeSelect.reset()
+        if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: 0, windowNumber: view.window?.windowNumber ?? 0, context: nil,
+                characters: "b", charactersIgnoringModifiers: "b", isARepeat: false, keyCode: 11) {
+            tableView.keyDown(with: event)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            let name = self.activeSelectionIndexes().first.flatMap {
+                self.items.indices.contains($0) ? self.items[$0].name : nil } ?? "nil"
+            NSLog("TYPESELECT synthKeyB selected=%@ (banana.txt 기대 — 라틴 실키 경로)", name)
+        }
+    }
+    func debugBrowserSelectFolder() {   // TF_COLUMNS — 컬럼 0의 첫 폴더 선택 → 두 번째 컬럼 캐스케이드 검증
+        guard let root = directory else { return }
+        let children = browserChildURLs(of: root)
+        guard let idx = children.firstIndex(where: { browserItem($0).isDirectory }) else { return }
+        browser.selectRow(idx, inColumn: 0)
+        browserClicked(browser)
+    }
+    func debugBrowserSelection() -> String { selectedBrowserURL()?.lastPathComponent ?? "nil" }
+    #endif
+
+    // MARK: Quick Look 팝업 (스페이스바 — Finder 규약, 제작자 지시 2026-07-25)
+
+    /// 스페이스바 → 시스템 Quick Look 패널 토글. 오른쪽 사이드 미리보기와 독립(순수 추가).
+    func toggleQuickLook() {
+        guard let panel = QLPreviewPanel.shared() else { return }
+        if QLPreviewPanel.sharedPreviewPanelExists(), panel.isVisible {
+            panel.orderOut(nil)
+        } else {
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func quickLookURLs() -> [URL] {
+        selectedURLs().filter { $0.isFileURL }   // 네트워크 센티널 등 비파일 제외
+    }
+
+    private var activeListResponder: NSView {
+        switch viewStyle {
+        case .list: return tableView
+        case .columns: return browser
+        case .icons, .gallery: return collectionView
+        }
+    }
+
+    /// 컬럼 뷰 등 하위 뷰가 스페이스를 소비 안 하면 컨트롤러가 받음(리스트/아이콘은 자체 가로채 onQuickLook).
+    override func keyDown(with event: NSEvent) {
+        if Int(event.keyCode) == 49,   // Space
+           !event.modifierFlags.contains(.command), !event.modifierFlags.contains(.option) {
+            toggleQuickLook(); return
+        }
+        super.keyDown(with: event)
+    }
+
+    // QLPreviewPanelController (informal, 응답 체인) — 활성 페인이 패널 제어(듀얼 페인 무료 라우팅)
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.delegate = self
+        panel.dataSource = self
+    }
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.delegate = nil
+        panel.dataSource = nil
+    }
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { quickLookURLs().count }
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
+        let urls = quickLookURLs()
+        return urls.indices.contains(index) ? urls[index] as NSURL : nil
+    }
+    /// 패널이 열린 채 받은 키 처리 (Finder 규약)
+    func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
+        guard event.type == .keyDown else { return false }
+        let code = Int(event.keyCode)
+        if code == 49 {   // Space = 닫기. 직접 닫고 소비 — 목록으로 되튕겨 onQuickLook 이중 토글되던 깜빡임 차단 (제작자 제보 2026-07-25)
+            panel.orderOut(nil)
+            return true
+        }
+        if [123, 124, 125, 126].contains(code) {   // 화살표 = 목록 탐색(선택 이동 → reloadData가 QL 따라감)
+            activeListResponder.keyDown(with: event)
+            return true
+        }
+        return false
+    }
+
     func setViewStyle(_ style: ViewStyle) {
         guard style != viewStyle else { return }
         let selection = Set(activeSelectionIndexes().compactMap {
@@ -579,7 +938,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         restoreSelection(urls: selection, scrollToFirst: true)
         selectionDidSync()
         // firstResponder 이관 — 안 하면 전환 직후 ⌘A·화살표가 숨은 뷰로 감 (파워유저 위원)
-        view.window?.makeFirstResponder(style == .list ? tableView : collectionView)
+        let responder: NSResponder = style == .list ? tableView : (style == .columns ? browser : collectionView)
+        view.window?.makeFirstResponder(responder)
         onViewStyleChange?(style)
     }
 
@@ -591,18 +951,23 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             NSLayoutConstraint.deactivate(gridModeConstraints + stripModeConstraints)
             NSLayoutConstraint.activate(viewStyle == .gallery ? stripModeConstraints : gridModeConstraints)
             view.layoutSubtreeIfNeeded()
-            if viewStyle == .list {
+            switch viewStyle {
+            case .list:
                 tableView.reloadData()          // stale row count 해소 후 노출 (QC 위원 크래시 경로)
-            } else {
+            case .icons, .gallery:
                 collectionView.collectionViewLayout = viewStyle == .icons
                     ? Self.makeGridLayout() : Self.makeStripLayout()
                 // 레이아웃 교체 후 재등록 — 교체가 등록 테이블을 무효화하는 AppKit 동작 방어
                 collectionView.register(FileIconItem.self, forItemWithIdentifier: FileIconItem.reuseIdentifier)
                 collectionView.reloadData()
+            case .columns:
+                reloadBrowser()   // NSBrowser 루트 = 현재 폴더 (제작자 지시 2026-07-25)
             }
             tableScroll.isHidden = viewStyle != .list
-            collectionScroll.isHidden = viewStyle == .list
+            collectionScroll.isHidden = !(viewStyle == .icons || viewStyle == .gallery)
             galleryBox.isHidden = viewStyle != .gallery
+            iconSizeBar.isHidden = viewStyle != .icons   // 슬라이더는 아이콘 모드 전용 (제작자 지시 2026-07-25)
+            browser.isHidden = viewStyle != .columns
             if viewStyle != .gallery {
                 galleryDebounce?.cancel()
                 galleryPreview.previewItem = nil   // 동영상 백그라운드 재생 중단 (QC 위원)
@@ -614,16 +979,21 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     // MARK: 활성 뷰 선택/리로드 추상화 — 테이블 직접 참조 금지 (QC 위원 전수 21곳 반영)
 
     private func activeSelectionIndexes() -> IndexSet {
-        viewStyle == .list
-            ? tableView.selectedRowIndexes
-            : IndexSet(collectionView.selectionIndexPaths.map(\.item))
+        switch viewStyle {
+        case .list: return tableView.selectedRowIndexes
+        case .columns: return []   // 브라우저 선택은 items 인덱스와 무관 — selectedURLs()가 컬럼 인지 (제작자 지시 2026-07-25)
+        case .icons, .gallery: return IndexSet(collectionView.selectionIndexPaths.map(\.item))
+        }
     }
 
     private func setActiveSelection(_ indexes: IndexSet, scrollToFirst: Bool) {
-        if viewStyle == .list {
+        switch viewStyle {
+        case .list:
             tableView.selectRowIndexes(indexes, byExtendingSelection: false)
             if scrollToFirst, let first = indexes.first { tableView.scrollRowToVisible(first) }
-        } else {
+        case .columns:
+            break   // 컬럼 선택은 브라우저가 관리 — 숨은 컬렉션의 scrollToItems 크래시 방지 (제작자 지시 2026-07-25)
+        case .icons, .gallery:
             collectionView.selectionIndexPaths = Set(indexes.map { IndexPath(item: $0, section: 0) })
             if scrollToFirst, let first = indexes.first {
                 collectionView.scrollToItems(
@@ -682,6 +1052,10 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         onSelect?(anchor.flatMap { items.indices.contains($0) ? items[$0] : nil })
         notifyStatus()
         if viewStyle == .gallery { updateGalleryPreview() }
+        // Quick Look 팝업이 열려 있으면 선택 이동을 따라감 (Finder 규약, 제작자 지시 2026-07-25)
+        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
+            QLPreviewPanel.shared().reloadData()
+        }
     }
 
     private func updateGalleryPreview() {
@@ -834,6 +1208,72 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         tableView.addTableColumn(column)
     }
 
+    // MARK: 헤더 우클릭 = 컬럼 표시/숨김 (Finder 규약, 캡처 기준 — 제작자 지시 2026-07-25)
+
+    private var headerColumnMenu: NSMenu?
+
+    /// 저장된 숨김 컬럼 적용 — 미저장 기본 = 최근사용일·추가된날짜·태그 숨김(Finder 기본). 이름은 항상 표시.
+    private func applyColumnVisibility() {
+        let hidden: Set<String>
+        if let saved = UserDefaults.standard.array(forKey: SettingsKeys.hiddenColumns) as? [String] {
+            hidden = Set(saved)
+        } else {
+            hidden = [SortKey.dateLastOpened.rawValue, SortKey.dateAdded.rawValue, SortKey.tags.rawValue]
+        }
+        for column in tableView.tableColumns where column.identifier.rawValue != SortKey.name.rawValue {
+            column.isHidden = hidden.contains(column.identifier.rawValue)
+        }
+    }
+
+    /// 헤더 우클릭 메뉴 구성 = 캡처 배치. 토글(데이터 있음)·회색 비활성(공개 API 부재/페치 비용, §17 규약).
+    private func setupColumnHeaderMenu() {
+        let menu = NSMenu()
+        menu.delegate = self            // menuNeedsUpdate에서 이 메뉴로 분기해 체크마크 갱신
+        menu.autoenablesItems = false   // 회색 항목 상태 수동 유지
+        func toggle(_ key: SortKey, _ title: String) {
+            let item = NSMenuItem(title: title, action: #selector(toggleColumn(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = key.rawValue
+            menu.addItem(item)
+        }
+        func grayed(_ title: String) {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.isEnabled = false   // 데이터 없음 — Finder도 회색(제작자 확정 2026-07-25)
+            menu.addItem(item)
+        }
+        toggle(.dateModified, L("Date Modified"))
+        toggle(.dateCreated, L("Date Created"))
+        toggle(.dateLastOpened, L("Date Last Opened"))
+        toggle(.dateAdded, L("Date Added"))
+        toggle(.size, L("Size"))
+        toggle(.kind, L("Kind"))
+        grayed(L("Last Modified By"))
+        grayed(L("Shared By"))
+        grayed(L("Version"))
+        grayed(L("Comments"))
+        toggle(.tags, L("Tags"))
+        headerColumnMenu = menu
+        tableView.headerView?.menu = menu
+    }
+
+    /// 메뉴 열릴 때 체크마크 = 현재 표시 상태 (menuNeedsUpdate에서 호출)
+    private func updateHeaderColumnMenuStates() {
+        guard let menu = headerColumnMenu else { return }
+        for item in menu.items {
+            guard let key = item.representedObject as? String,
+                  let column = tableView.tableColumns.first(where: { $0.identifier.rawValue == key }) else { continue }
+            item.state = column.isHidden ? .off : .on
+        }
+    }
+
+    @objc private func toggleColumn(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String,
+              let column = tableView.tableColumns.first(where: { $0.identifier.rawValue == key }) else { return }
+        column.isHidden.toggle()
+        let hidden = tableView.tableColumns.filter(\.isHidden).map { $0.identifier.rawValue }
+        UserDefaults.standard.set(hidden, forKey: SettingsKeys.hiddenColumns)
+    }
+
     /// 네트워크 브라우즈 센티널 — show(directory:) 단일 초크포인트로 탭·히스토리·듀얼 페인 공짜 (워게임 network_browse)
     static let networkURL = URL(string: "treefinder://network")!
     var isNetworkBrowse: Bool { directory == Self.networkURL }
@@ -847,6 +1287,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         navigatingViaHistory = false
         self.directory = directory
         filterText = ""   // 폴더 이동 시 검색 필터 초기화 (Finder 규약)
+        tableView.typeSelect.reset(); collectionView.typeSelect.reset()   // type-select 버퍼 리셋 (조사 §함정6)
         searchTask?.cancel(); stopSpotlight(); searchResults = nil   // 진행 중 검색 취소 (제작자 지시 2026-07-23)
         if tabs.isEmpty { tabs = [TabState(url: directory, viewStyle: viewStyle)] } else { tabs[activeTab].url = directory }
         refreshTabBar()
@@ -906,7 +1347,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                   let url = URL(string: "smb://\(encoded)") else { return nil }
             return FileItem(url: url, name: name, isDirectory: false, isPackage: false,
                             fileSize: nil, dateModified: nil, dateCreated: nil,
-                            kind: L("Network computer"), labelNumber: 0)
+                            kind: L("Network computer"), labelNumber: 0,
+                            dateLastOpened: nil, dateAdded: nil, tagNames: "")
         }
         // 로컬 네트워크 권한 거부/초기 탐색 중 = 결과 0 — 정직한 상태 라벨 (워게임 §4)
         messageLabel.stringValue = allItems.isEmpty ? L("Searching for network computers…") : ""
@@ -1117,12 +1559,39 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     override var undoManager: UndoManager? { fileUndoManager }
     private var cutSourceURLs: Set<URL> = []   // 앱 내 잘라내기 상태
     private var editingRow: Int?
+    private weak var editingIconItem: FileIconItem?   // 아이콘 뷰 인라인 rename 중인 셀 (제작자 지시 2026-07-25)
 
     @objc func undo(_ sender: Any?) { fileUndoManager.undo() }
     @objc func redo(_ sender: Any?) { fileUndoManager.redo() }
 
     private func selectedURLs() -> [URL] {
-        activeSelectionIndexes().compactMap { items.indices.contains($0) ? items[$0].url : nil }
+        if viewStyle == .columns {   // 컬럼 뷰 선택은 깊은 컬럼일 수 있어 items 인덱스와 무관 (제작자 지시 2026-07-25)
+            return browser.selectionIndexPaths.compactMap { browser.item(at: $0) as? URL }
+        }
+        return activeSelectionIndexes().compactMap { items.indices.contains($0) ? items[$0].url : nil }
+    }
+
+    /// 목록 우클릭 "추출" — 선택된 착탈식 볼륨 전체 추출(Finder 규약, 제작자 확정 2026-07-25).
+    /// 판정 = VolumeMonitor 메모리 조회, 추출 = VolumeEjector 오프메인 합류점(규칙 4).
+    @objc func ejectSelectedVolumes(_ sender: Any?) {
+        var targets = selectedURLs().filter { VolumeMonitor.shared.isEjectable($0) }
+        if targets.isEmpty, let u = (sender as? NSMenuItem)?.representedObject as? URL,
+           VolumeMonitor.shared.isEjectable(u) { targets = [u] }   // 선택 밖 항목 우클릭 폴백
+        for volume in targets {
+            navigateAwayIfInside(volume)   // 자기 볼륨 응시 시 먼저 이탈(미리보기·워처 해제 → 자기유발 busy 예방)
+            VolumeEjector.eject(volume, presenter: view.window)
+        }
+    }
+
+    /// 현재 폴더가 대상 볼륨 하위(또는 자신)면 홈으로 이탈 — 유령 목록·죽은 미리보기 방지.
+    /// 목록 추출·트리 추출·Finder 외부 추출(didUnmount) 공용 단일 경로(규칙 4, 제작자 지시 2026-07-25).
+    private func navigateAwayIfInside(_ volume: URL) {
+        guard let dir = directory, dir.isFileURL else { return }
+        let d = dir.standardizedFileURL.path
+        let v = volume.standardizedFileURL.path
+        if d == v || d.hasPrefix(v.hasSuffix("/") ? v : v + "/") {
+            show(directory: FileManager.default.homeDirectoryForCurrentUser)
+        }
     }
 
     // MARK: Finder 색상 태그 (제작자 지시 2026-07-23)
@@ -1381,21 +1850,31 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     @objc func renameSelected(_ sender: Any?) {
-        // 인라인 rename은 리스트 전용 — 아이콘 모드에서 숨은 테이블의 stale row 편집 방지 (워게임 §4)
-        guard viewStyle == .list, searchResults == nil else { return }   // 검색 결과 중 rename 비활성 (제작자 지시 2026-07-23)
-        let row = tableView.selectedRow
-        guard row >= 0,
-              let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSTableCellView,
-              let field = cell.textField else { return }
-        editingRow = row
-        field.isEditable = true
-        field.delegate = self
-        view.window?.makeFirstResponder(field)
-        // 확장자 앞부분만 선택 (Finder 규약)
-        if let editor = field.currentEditor() {
-            let name = field.stringValue as NSString
-            let dot = name.range(of: ".", options: .backwards)
-            editor.selectedRange = NSRange(location: 0, length: dot.location == NSNotFound ? name.length : dot.location)
+        guard searchResults == nil else { return }   // 검색 결과 중 rename 비활성 (제작자 지시 2026-07-23)
+        if viewStyle == .list {
+            let row = tableView.selectedRow
+            guard row >= 0,
+                  let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSTableCellView,
+                  let field = cell.textField else { return }
+            editingRow = row
+            field.isEditable = true
+            field.delegate = self
+            view.window?.makeFirstResponder(field)
+            // 확장자 앞부분만 선택 (Finder 규약)
+            if let editor = field.currentEditor() {
+                let name = field.stringValue as NSString
+                let dot = name.range(of: ".", options: .backwards)
+                editor.selectedRange = NSRange(location: 0, length: dot.location == NSNotFound ? name.length : dot.location)
+            }
+        } else if viewStyle == .icons {   // 아이콘 뷰 인라인 rename (제작자 지시 2026-07-25) — 갤러리는 라벨 없어 제외
+            let selection = activeSelectionIndexes()
+            guard selection.count == 1, let index = selection.first, items.indices.contains(index) else { return }
+            let indexPath = IndexPath(item: index, section: 0)
+            collectionView.scrollToItems(at: [indexPath], scrollPosition: .nearestVerticalEdge)
+            guard let cell = collectionView.item(at: indexPath) as? FileIconItem else { return }
+            editingRow = index
+            editingIconItem = cell
+            cell.beginEditing(fullName: items[index].name, delegate: self)   // 확장자 앞부분 선택은 셀 내부
         }
     }
 
@@ -1429,6 +1908,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 Task { await SizeService.shared.invalidate(childrenOf: directory) }
                 self.rebuildItems(preserveSelection: true)
                 self.requestFolderSizes()
+                // 컬럼 뷰: 루트 구성 변화 시에만 브라우저 재적재(메타 변화엔 안 함 — 깜빡임 방지).
+                // 한계(v1): 재적재는 컬럼 0으로 접힘(깊은 컬럼 선택 소실). 탐색·미리보기·열기는 무영향.
+                if self.viewStyle == .columns { self.reloadBrowser() }
             }
             self.beginPendingRename()   // 새 폴더 생성 직후 이름변경 진입 (제작자 지시 2026-07-23)
         }
@@ -1453,10 +1935,10 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         pendingRenameURL = nil
         // 디렉토리 URL의 후행 슬래시·표준화 차이로 == 가 어긋나므로 경로로 비교 (실측)
         let target = url.standardizedFileURL.path
-        guard viewStyle == .list,
+        // 리스트·아이콘 공용 — 갤러리는 인라인 라벨이 없어 편집 진입 없이 선택만 (제작자 지시 2026-07-25)
+        guard viewStyle == .list || viewStyle == .icons,
               let row = items.firstIndex(where: { $0.url.standardizedFileURL.path == target }) else { return }
-        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        tableView.scrollRowToVisible(row)
+        setActiveSelection(IndexSet(integer: row), scrollToFirst: true)
         DispatchQueue.main.async { [weak self] in self?.renameSelected(nil) }   // 셀 생성 후 편집 진입
     }
 
@@ -1632,6 +2114,10 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     // MARK: 컨텍스트 메뉴 (원본 레퍼런스 구성 — DESIGN_REFERENCE §13, 미구현 파일 조작은 비활성)
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === headerColumnMenu {   // 헤더 우클릭 = 체크마크만 갱신(항목 재구성 아님, 제작자 지시 2026-07-25)
+            updateHeaderColumnMenuStates()
+            return
+        }
         menu.removeAllItems()
         if isNetworkBrowse {   // 가상 항목 — 파일 조작 메뉴 금지, 연결만 (워게임 network_browse)
             guard let row = activeClickedIndex(), items.indices.contains(row) else { return }
@@ -1646,15 +2132,22 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             menu.addItem(connect)
             return
         }
-        guard let row = activeClickedIndex(), items.indices.contains(row) else {
-            buildBackgroundMenu(menu)   // 빈 영역 우클릭
-            return
+        let item: FileItem
+        if viewStyle == .columns {
+            // 컬럼 뷰: 우클릭 대상 = 현재 브라우저 선택(셀 클릭이 선택을 바꾼 뒤 메뉴가 뜸). 선택 없으면 배경 메뉴.
+            guard let selectedURL = selectedBrowserURL() else { buildBackgroundMenu(menu); return }
+            item = browserItem(selectedURL)
+        } else {
+            guard let row = activeClickedIndex(), items.indices.contains(row) else {
+                buildBackgroundMenu(menu)   // 빈 영역 우클릭
+                return
+            }
+            if !activeSelectionIndexes().contains(row) {   // Finder 규약: 우클릭 항목을 선택으로
+                setActiveSelection(IndexSet(integer: row), scrollToFirst: false)
+                if viewStyle != .list { selectionDidSync() }   // 컬렉션 프로그램적 선택 = 델리게이트 침묵
+            }
+            item = items[row]
         }
-        if !activeSelectionIndexes().contains(row) {   // Finder 규약: 우클릭 항목을 선택으로
-            setActiveSelection(IndexSet(integer: row), scrollToFirst: false)
-            if viewStyle != .list { selectionDidSync() }   // 컬렉션 프로그램적 선택 = 델리게이트 침묵
-        }
-        let item = items[row]
         let url = item.url
 
         func entry(_ title: String, _ symbol: String, _ action: Selector?, enabled: Bool = true) -> NSMenuItem {
@@ -1681,6 +2174,12 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         menu.addItem(entry(L("Show in Finder"), "magnifyingglass.circle", #selector(showInFinderClicked(_:))))
         menu.addItem(entry(L("Open in Terminal"), "terminal",
                            #selector(openInTerminalClicked(_:)), enabled: item.isDirectory))
+        // 착탈식 볼륨(네트워크·USB·외장·디스크이미지) = 추출 (제작자 지시 2026-07-25).
+        // 판정은 VolumeMonitor 메모리 조회 — 죽은 마운트에도 메인 스레드 stat 없음(§3/§6, 위원회 must-fix).
+        if VolumeMonitor.shared.isEjectable(url) {
+            menu.addItem(.separator())
+            menu.addItem(entry(L("Eject"), "eject", #selector(ejectSelectedVolumes(_:))))
+        }
         menu.addItem(.separator())
         menu.addItem(entry(L("Cut"), "scissors", #selector(cut(_:))))
         menu.addItem(entry(L("Copy"), "doc.on.doc", #selector(copy(_:))))
@@ -1690,9 +2189,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         menu.addItem(entry(L("Duplicate"), "square.filled.on.square", #selector(duplicateSelected(_:))))
         menu.addItem(entry(L("Compress"), "doc.zipper", #selector(compressSelected(_:))))
         menu.addItem(.separator())
-        // 인라인 rename은 리스트 전용 (워게임 §4 — 미구현은 비활성, §13 규약)
+        // 인라인 rename = 리스트 + 아이콘(갤러리는 라벨 없어 제외) (제작자 지시 2026-07-25)
         menu.addItem(entry(L("Rename"), "character.cursor.ibeam", #selector(renameSelected(_:)),
-                           enabled: viewStyle == .list))
+                           enabled: viewStyle == .list || viewStyle == .icons))
         menu.addItem(entry(L("Move to Trash"), "trash", #selector(deleteSelected(_:))))
         if RestoreRecords.original(for: url) != nil {   // TreeFinder가 지운 휴지통 항목만 (decisions §14)
             menu.addItem(entry(L("Restore"), "arrow.uturn.backward", #selector(restoreSelected(_:))))
@@ -1830,6 +2329,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             target.reloadCurrentDirectory()
         }
         fileUndoManager.setActionName(L("New Text Document"))
+        pendingRenameURL = dest   // 생성 직후 이름변경 상태로 — 새 폴더와 동일 (Finder 규약, 제작자 지시 2026-07-25)
         reloadCurrentDirectory()
     }
 
@@ -2095,6 +2595,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 : FileManager.default.displayName(atPath: item.url.path)   // hide-extension 존중(':'→'/' 내장)
         case "dateModified": return Self.dateText(item.dateModified)
         case "dateCreated": return Self.dateText(item.dateCreated)
+        case "dateLastOpened": return Self.dateText(item.dateLastOpened)   // 최근 사용일 (제작자 지시 2026-07-25)
+        case "dateAdded": return Self.dateText(item.dateAdded)             // 추가된 날짜
+        case "tags": return item.tagNames.isEmpty ? "—" : item.tagNames    // 태그(라벨 색 이름)
         case "size":
             if let size = item.fileSize { return Self.sizeFormatter.string(fromByteCount: Int64(size)) }
             switch folderSizes[sizeKey(item.url)] {
@@ -2196,6 +2699,11 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     func debugNewFolder() { newFolder(nil) }   // TF_NEW_FOLDER — 새 폴더=이름변경 상태 진입 검증
+    func debugNewTextDocument() { newTextDocument(nil) }   // TF_NEW_TEXTDOC — 새 텍스트 문서=이름변경 상태 진입 검증
+    func debugEditingState() -> String {   // 이름변경 편집 진입 여부 실측(편집 중이면 editingRow≠nil·필드에디터 firstResponder)
+        let fr = view.window?.firstResponder
+        return "editingRow=\(String(describing: editingRow)) firstResponder=\(fr.map { String(describing: type(of: $0)) } ?? "nil")"
+    }
 
     func debugSetTag(_ number: Int) {   // TF_SET_TAG — 첫 항목에 색상 태그 적용(목록 행 색 검증)
         guard !items.isEmpty else { return }
@@ -2215,9 +2723,10 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         notifyStatus()
     }
 
-    /// 리스트 type-select — 컬렉션과 동일한 첫 글자 점프 (파워유저 위원)
+    /// 리스트 type-select = 내장 경로 폐기, IME(NSTextInputClient) 경로로 통일 (제작자 지시 2026-07-25, 조사 반영).
+    /// nil 반환으로 NSTableView 내장 type-select 비활성 — 완성형 못하는 라틴 경로 + IME 이중발화 차단.
     func tableView(_ tableView: NSTableView, typeSelectStringFor tableColumn: NSTableColumn?, row: Int) -> String? {
-        items.indices.contains(row) ? items[row].name : nil
+        nil
     }
 
     // MARK: NSCollectionViewDataSource / Delegate (아이콘·갤러리 — 워게임 [2026-07-16]_wargame_icon_gallery_view.md)
@@ -2233,7 +2742,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         let item = items[indexPath.item]
         iconItem.configure(item: item,
                            variant: viewStyle == .gallery ? .strip : .grid,
-                           isCut: cutSourceURLs.contains(item.url))
+                           isCut: cutSourceURLs.contains(item.url),
+                           gridSide: IconGridMetrics.side)
         return cell
     }
 

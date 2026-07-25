@@ -470,6 +470,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-newfolder.png")
             }
         }
+        // TF_NEW_TEXTDOC=1 → (TF_START_DIR 병용) 새 텍스트 문서가 이름변경 상태로 생성되는지 실측 (제작자 지시 2026-07-25)
+        if ProcessInfo.processInfo.environment["TF_NEW_TEXTDOC"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { wc.debugNewTextDocument() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                NSLog("NEW_TEXTDOC %@", wc.debugEditingState())   // editingRow≠nil·필드에디터면 이름변경 진입 성공
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-newtextdoc.png")
+            }
+        }
+        // TF_EJECT_TEST=1 → (TF_START_DIR=/Volumes 병용) 착탈식 볼륨 추출 판정·트리 ⏏·목록 메뉴 노출 비파괴 검증 (제작자 지시 2026-07-25)
+        if ProcessInfo.processInfo.environment["TF_EJECT_TEST"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                let roots = VolumeMonitor.shared.ejectableRoots.map(\.path).sorted()
+                NSLog("EJECT_TEST ejectableRoots=%@", roots.description)
+                for p in ["/Volumes/TF테스트USB", "/", "/System/Volumes/Data"] {
+                    NSLog("EJECT_TEST isEjectable(%@)=%@", p,
+                          VolumeMonitor.shared.isEjectable(URL(fileURLWithPath: p)) ? "true" : "false")
+                }
+                for line in wc.debugEjectTreeInfo() { NSLog("EJECT_TEST tree %@", line) }
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-eject.png")
+            }
+        }
+        // TF_EJECT_DO=1 → (TF_START_DIR=/Volumes/TF테스트USB 병용) 볼륨 안을 보는 중 그 볼륨 추출 → 홈 이탈 + 언마운트 실측 (파괴적, 제작자 지시 2026-07-25)
+        if ProcessInfo.processInfo.environment["TF_EJECT_DO"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                NSLog("EJECT_DO before dir=%@ mounted=%@", wc.debugCurrentDirectory(),
+                      FileManager.default.fileExists(atPath: "/Volumes/TF테스트USB") ? "true" : "false")
+                wc.debugEjectVolume("/Volumes/TF테스트USB")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                NSLog("EJECT_DO after dir=%@ mounted=%@", wc.debugCurrentDirectory(),
+                      FileManager.default.fileExists(atPath: "/Volumes/TF테스트USB") ? "true" : "false")
+            }
+        }
+        // TF_ICON_RENAME=1 → (TF_START_DIR 병용) 아이콘 뷰에서 첫 항목 인라인 이름변경 진입 실측 (제작자 지시 2026-07-25)
+        if ProcessInfo.processInfo.environment["TF_ICON_RENAME"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { wc.debugSetViewStyle("icons") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { wc.debugSelectFirstFile() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) { wc.debugRename() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
+                NSLog("ICON_RENAME %@", wc.debugEditingState())   // editingRow≠nil·필드에디터면 편집 진입 성공
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-iconrename.png")
+            }
+        }
+        // TF_QUICKLOOK=1 → (TF_START_DIR 병용) 스페이스바 Quick Look 팝업 실측 (제작자 지시 2026-07-25)
+        if ProcessInfo.processInfo.environment["TF_QUICKLOOK"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { wc.debugQuickLook() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                NSLog("QUICKLOOK open %@", wc.debugQuickLookState())   // visible=true·item=선택파일이면 성공
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.3) {
+                let consumed = wc.debugQuickLookCloseViaSpace()       // Space 닫기 경로 = 소비(되튕김 없음)
+                NSLog("QUICKLOOK closeConsumed=%@", consumed ? "true" : "false")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
+                NSLog("QUICKLOOK afterClose %@", wc.debugQuickLookState())   // visible=false면 깜빡임 없이 닫힘
+            }
+        }
+        // TF_COLUMN_MENU=1 → (TF_START_DIR 병용) 헤더 우클릭 메뉴 구조 로그 + 최근사용일·태그 컬럼 표시 후 렌더 (제작자 지시 2026-07-25)
+        if ProcessInfo.processInfo.environment["TF_COLUMN_MENU"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                for line in wc.debugColumnHeaderMenu() { NSLog("COLMENU %@", line) }
+                wc.debugShowColumn("dateLastOpened"); wc.debugShowColumn("tags")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-columnmenu.png")
+            }
+        }
+        // TF_TYPESELECT=1 → (TF_START_DIR 병용) type-select 매처(완성형·초성·라틴) + inputContext 실측 (제작자 지시 2026-07-25)
+        if ProcessInfo.processInfo.environment["TF_TYPESELECT"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { wc.debugTypeSelectProbe() }
+        }
+        // TF_COLUMNS=1 → (TF_START_DIR 병용) 컬럼 뷰 전환 + 폴더 선택 캐스케이드 실측 (제작자 지시 2026-07-25)
+        if ProcessInfo.processInfo.environment["TF_COLUMNS"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { wc.debugSetViewStyle("columns") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { wc.debugBrowserSelectFolder() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
+                NSLog("COLUMNS selection=%@", wc.debugBrowserSelection())
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-columns.png")
+            }
+        }
         // TF_SET_TAG=<1~7> → (TF_START_DIR 병용) 첫 항목에 색상 태그 적용 후 목록 행 색 + 스와치 뷰 렌더 검증 (제작자 지시 2026-07-23)
         if let tagRaw = ProcessInfo.processInfo.environment["TF_SET_TAG"], let n = Int(tagRaw) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { wc.debugSetTag(n) }
@@ -611,9 +691,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dualPane.keyEquivalentModifierMask = [.command, .shift]
         viewMenu.addItem(dualPane)
         viewMenu.addItem(.separator())
-        // 뷰 스타일 라디오 — ⌥⌘1/2/3 (⌘1..9는 탭 전환 배정, Finder ⌘1..4의 근접 대안)
+        // 뷰 스타일 라디오 — ⌥⌘1/2/3/4 (⌘1..9는 탭 전환 배정, Finder ⌘1..4의 근접 대안). 컬럼 추가 2026-07-25.
         for (index, (title, style)) in [(L("Icons"), "icons"), (L("List"), "list"),
-                                        (L("Gallery"), "gallery")].enumerated() {
+                                        (L("Columns"), "columns"), (L("Gallery"), "gallery")].enumerated() {
             let entry = NSMenuItem(title: title,
                                    action: #selector(MainWindowController.applyViewStyle(_:)),
                                    keyEquivalent: "\(index + 1)")

@@ -761,6 +761,66 @@
         }
       }
     },
+    "Columns": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컬럼"
+          }
+        }
+      }
+    },
+    "Comments": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "설명"
+          }
+        }
+      }
+    },
+    "Date Added": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "추가된 날짜"
+          }
+        }
+      }
+    },
+    "Date Last Opened": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "최근 사용일"
+          }
+        }
+      }
+    },
+    "Last Modified By": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "최근 수정한 사람"
+          }
+        }
+      }
+    },
+    "Shared By": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "공유한 사람"
+          }
+        }
+      }
+    },
     "Gallery": {
       "localizations": {
         "ko": {

@@ -59,6 +59,10 @@ struct FileItem: Equatable {   // 메타 변화 감지(행 단위 갱신 — 깜
     let kind: String
     /// Finder 라벨 번호(0=없음) — 이름 매칭 금지, 시스템 번호로 색 해석 (PLAYBOOK 2부 §3-2)
     let labelNumber: Int
+    /// 헤더 우클릭 선택 컬럼용 (제작자 지시 2026-07-25) — 기본 숨김, 리스팅 시 배치 페치
+    let dateLastOpened: Date?
+    let dateAdded: Date?
+    let tagNames: String   // 라벨 색 이름 목록(쉼표 구분) — 표시·정렬용
 
     var icon: NSImage {
         // 네트워크 컴퓨터 등 비파일 URL 항목 (워게임 network_browse)
@@ -68,8 +72,9 @@ struct FileItem: Equatable {   // 메타 변화 감지(행 단위 갱신 — 깜
 }
 
 /// 파일 목록 정렬 키 — rawValue가 NSSortDescriptor의 key로 그대로 쓰인다
+/// dateLastOpened·dateAdded·tags = 헤더 우클릭으로 표시하는 선택 컬럼 (제작자 지시 2026-07-25)
 enum SortKey: String {
-    case name, dateModified, dateCreated, size, kind
+    case name, dateModified, dateCreated, dateLastOpened, dateAdded, size, kind, tags
 }
 
 /// 앱이 클립보드에 쓰는 모든 플레인 텍스트의 단일 창구 — NFC 보정(자모 분리 방지)이 여기서 일어난다.
@@ -138,6 +143,8 @@ enum DirectoryLister {
     static let resourceKeys: [URLResourceKey] = [
         .isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .fileSizeKey,
         .contentModificationDateKey, .creationDateKey, .localizedTypeDescriptionKey, .labelNumberKey,
+        // 헤더 우클릭 선택 컬럼 (제작자 지시 2026-07-25) — 배치 페치라 비용 미미
+        .contentAccessDateKey, .addedToDirectoryDateKey, .tagNamesKey,
     ]
 
     /// 블로킹 파일시스템 호출을 메인 스레드 밖으로 보낸다.
@@ -182,7 +189,10 @@ enum DirectoryLister {
             dateModified: values?.contentModificationDate,
             dateCreated: values?.creationDate,
             kind: values?.localizedTypeDescription ?? "",
-            labelNumber: values?.labelNumber ?? 0
+            labelNumber: values?.labelNumber ?? 0,
+            dateLastOpened: values?.contentAccessDate,
+            dateAdded: values?.addedToDirectoryDate,
+            tagNames: (values?.tagNames ?? []).joined(separator: ", ")
         )
     }
 
@@ -219,6 +229,11 @@ enum DirectoryLister {
                                                b.dateModified?.timeIntervalSince1970)
             case .dateCreated: return numeric(a.dateCreated?.timeIntervalSince1970,
                                               b.dateCreated?.timeIntervalSince1970)
+            case .dateLastOpened: return numeric(a.dateLastOpened?.timeIntervalSince1970,
+                                                 b.dateLastOpened?.timeIntervalSince1970)
+            case .dateAdded: return numeric(a.dateAdded?.timeIntervalSince1970,
+                                            b.dateAdded?.timeIntervalSince1970)
+            case .tags: return a.tagNames.localizedStandardCompare(b.tagNames)
             case .size:
                 let sizeA = sizeOf?(a) ?? a.fileSize.map(Int64.init)
                 let sizeB = sizeOf?(b) ?? b.fileSize.map(Int64.init)
@@ -246,7 +261,7 @@ enum DirectoryLister {
         func mk(_ name: String, dir: Bool, size: Int? = nil) -> FileItem {
             FileItem(url: URL(fileURLWithPath: "/" + name), name: name, isDirectory: dir,
                      isPackage: false, fileSize: size, dateModified: nil, dateCreated: nil, kind: "",
-                     labelNumber: 0)
+                     labelNumber: 0, dateLastOpened: nil, dateAdded: nil, tagNames: "")
         }
         let out = sorted([mk("b.txt", dir: false), mk("Zeta", dir: true),
                           mk("apple", dir: true), mk("A 10.txt", dir: false), mk("A 2.txt", dir: false)])
