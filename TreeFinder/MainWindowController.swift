@@ -431,6 +431,12 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         treeController?.reveal(url)
     }
 
+    // TF_TREE_MANUAL — 외부 이름 변경 후 사용자 새로 고침·메뉴 구성 검증 (제작자 제보 2026-07-25)
+    func debugRefreshTree() { treeController?.refreshTree() }
+    func debugTreeMenuTitles(forNodeAt url: URL?) -> [String] {
+        treeController?.debugMenuTitles(forNodeAt: url) ?? []
+    }
+
     func debugNewFolder() { listController?.debugNewFolder() }   // TF_NEW_FOLDER
     func debugNewTextDocument() { listController?.debugNewTextDocument() }   // TF_NEW_TEXTDOC
     func debugEditingState() -> String { listController?.debugEditingState() ?? "nil" }

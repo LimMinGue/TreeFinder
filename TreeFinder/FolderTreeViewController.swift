@@ -261,6 +261,15 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
             for node in self.localLocations { self.outlineView.reloadItem(node) }
         }
         _ = VolumeMonitor.shared   // 스냅숏 부트스트랩(첫 refresh 트리거 — 옵저버 등록 후)
+        // 다른 앱·터미널에서 폴더 이름을 바꾸고 TreeFinder로 돌아오는 순간 트리 최신화 (제작자 제보 2026-07-25).
+        // FSEvents 전 트리 재귀 감시는 리로드 루프·CPU 폭주로 이미 폐기된 길(§18) — 복귀 시점 1회로 대체.
+        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            #if DEBUG
+            NSLog("TREE_AUTO_REFRESH (앱 활성화)")
+            #endif
+            self?.refreshTree()
+        }
         // 발견 호스트 변화 → 네트워크 그룹만 갱신 (제작자 지시 2026-07-23 — 트리에도 발견 목록)
         NotificationCenter.default.addObserver(forName: .networkHostsChanged, object: nil, queue: .main) {
             [weak self] _ in
@@ -527,6 +536,23 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         }
     }
 
+    /// 트리 전체 최신화 — 이미 펼쳐본(materialize된) 노드의 자식만 다시 읽는다.
+    /// 다른 앱·터미널이 바꾼 폴더 이름이 트리에 옛 이름으로 남던 문제의 단일 수렴점
+    /// (제작자 제보 2026-07-25 — 우클릭 "새로 고침"·앱 복귀 시 자동 갱신 공용, 규칙 4).
+    /// 원인: `FolderNode.children`는 영구 캐시인데 갱신 트리거가 "지금 보고 있는 폴더"(FSEvents·refreshNode)뿐이었음.
+    /// - 변화가 있는 노드만 `reloadItem` — 무변화면 다시 그리지 않는다(§18 깜빡임 규약).
+    /// - 미로드 노드는 건너뜀(다음 loadChildren이 최신). 비로컬 볼륨은 **하위로 내려가지 않음**
+    ///   — 동기 리스팅이라 죽은 네트워크 마운트에서 메인 스레드가 얼어붙는다(§3, 같은 함정 4회째 방어).
+    func refreshTree() {
+        var stack = localLocations
+        while let node = stack.popLast() {
+            guard node.loadedChildren != nil, !VolumeMonitor.shared.isNonLocal(node.url) else { continue }
+            let changed = node.refreshChildren()
+            stack.append(contentsOf: node.loadedChildren ?? [])
+            if changed { outlineView.reloadItem(node, reloadChildren: true) }
+        }
+    }
+
     /// 트리에 실재하는 루트(홈·볼륨)와 이미 로드된 하위만 순회해 경로 일치 노드를 찾는다(미로드 노드 강제 로드 금지).
     private func materializedNode(matching normalizedPath: String) -> FolderNode? {
         var stack = localLocations   // 휴지통은 잎이라 제외, 즐겨찾기는 FolderNode 아님
@@ -555,6 +581,17 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         return (node.loadedChildren ?? []).map {
             $0.hasCustomIcon ? "\($0.name)[custom]" : $0.name
         }
+    }
+
+    /// TF_TREE_MANUAL — 우클릭 메뉴 구성을 실제 빌드 경로로 확인(사이드바 비브런시라 스냅숏이 백지, §18 한계 우회).
+    /// url=nil → 빈 공간 우클릭 재현.
+    func debugMenuTitles(forNodeAt url: URL?) -> [String] {
+        let item: Any? = url.flatMap {
+            materializedNode(matching: PathPasteboard.normalized($0.standardizedFileURL.path))
+        }
+        let menu = NSMenu()
+        buildMenu(menu, item: item)
+        return menu.items.map { $0.isSeparatorItem ? "─" : $0.title }
     }
 
     /// TF_TREE_NETWORK — 네트워크 그룹 확장(Bonjour 시작) 후 자식 구성을 로그로 확인
@@ -647,9 +684,22 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
 
     // 원본 레퍼런스 구성: Open in New Tab / New Window / Terminal ─ Add to Favorites (2026-07-16)
     func menuNeedsUpdate(_ menu: NSMenu) {
+        buildMenu(menu, item: outlineView.clickedRow >= 0
+                  ? outlineView.item(atRow: outlineView.clickedRow) : nil)
+    }
+
+    /// 우클릭 메뉴 구성 — 클릭 행(없으면 빈 공간)을 받는 단일 소스(검증에서도 같은 경로를 씀)
+    private func buildMenu(_ menu: NSMenu, item: Any?) {
         menu.removeAllItems()
-        guard outlineView.clickedRow >= 0 else { return }
-        let item = outlineView.item(atRow: outlineView.clickedRow)
+        // 사용자 새로 고침 — 목록 배경 메뉴와 동일 용어·심볼(규칙 6 용어 일관성, 제작자 지시 2026-07-25)
+        let refresh = NSMenuItem(title: L("Refresh"), action: #selector(refreshTreeMenu(_:)), keyEquivalent: "")
+        refresh.target = self
+        refresh.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: L("Refresh"))
+        // 빈 공간 우클릭 = 새로 고침만 (탐색기 규약 — 지금까진 빈 메뉴가 떴음)
+        guard let item else {
+            menu.addItem(refresh)
+            return
+        }
         if let host = item as? NetworkHostItem {
             let connect = NSMenuItem(title: L("Connect"), action: #selector(connectHost(_:)), keyEquivalent: "")
             connect.target = self
@@ -677,6 +727,8 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         menu.addItem(.separator())
         // 목록 메뉴와 동일 용어·심볼 — 트리 폴더도 경로 복사 (제작자 지시 2026-07-24)
         menu.addItem(entry(L("Copy Path"), "link", #selector(copyPathAction(_:))))
+        menu.addItem(.separator())
+        menu.addItem(refresh)   // 탐색·클립보드와 성격이 달라 독립 구간 (디자이너)
         menu.addItem(.separator())
 
         if item is FolderNode {
@@ -773,6 +825,8 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         guard let url = sender.representedObject as? URL else { return }
         ExternalOpen.inTerminal(url)
     }
+
+    @objc private func refreshTreeMenu(_ sender: Any?) { refreshTree() }
 
     @objc private func copyPathAction(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }

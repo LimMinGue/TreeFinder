@@ -400,6 +400,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-tree.png")
             }
         }
+        // TF_TREE_MANUAL=<하위폴더>/<대상폴더> → (TF_START_DIR 병용, 홈 아래 경로) 트리를 그 하위까지 펼친 뒤
+        // 앱 바깥에서 대상 폴더 이름을 바꿔(터미널·타 앱 재현) ① 옛 이름이 남는지(버그 재현)
+        // ② refreshTree()로 고쳐지는지 ③ 우클릭 메뉴 구성에 "새로 고침"이 있는지 로그 검증 (제작자 제보 2026-07-25)
+        if let spec = ProcessInfo.processInfo.environment["TF_TREE_MANUAL"] {
+            let parts = spec.split(separator: "/").map(String.init)
+            if parts.count == 2 {
+                let parent = startDirectory.appendingPathComponent(parts[0])
+                let target = parent.appendingPathComponent(parts[1])
+                let renamed = parent.appendingPathComponent(parts[1] + "-바뀐이름")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { wc.debugRevealTree(parent) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    NSLog("TREE_MANUAL before: [%@]", wc.debugTreeChildNames(of: parent).joined(separator: ", "))
+                    try? FileManager.default.moveItem(at: target, to: renamed)   // 외부 이름 변경 재현
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    NSLog("TREE_MANUAL stale: [%@]", wc.debugTreeChildNames(of: parent).joined(separator: ", "))
+                    wc.debugRefreshTree()   // 우클릭 "새로 고침"과 동일 경로
+                    // 동기 로그 — 앱 활성화 자동 갱신이 끼어들 틈 없이 수동 경로 단독 효과를 확정
+                    NSLog("TREE_MANUAL afterManual: [%@]",
+                          wc.debugTreeChildNames(of: parent).joined(separator: ", "))
+                }
+                // 2차: 외부 이름 변경 후 다른 앱 → TreeFinder 복귀(셸이 전환) = 자동 갱신 단독 검증
+                DispatchQueue.main.asyncAfter(deadline: .now() + 9.0) {
+                    NSLog("TREE_MANUAL autoAfter: [%@]",
+                          wc.debugTreeChildNames(of: parent).joined(separator: ", "))
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    NSLog("TREE_MANUAL after: [%@]", wc.debugTreeChildNames(of: parent).joined(separator: ", "))
+                    NSLog("TREE_MANUAL menu(folder): [%@]",
+                          wc.debugTreeMenuTitles(forNodeAt: parent).joined(separator: " | "))
+                    NSLog("TREE_MANUAL menu(empty): [%@]",
+                          wc.debugTreeMenuTitles(forNodeAt: nil).joined(separator: " | "))
+                }
+            }
+        }
         // TF_TREE_NETWORK=1 → 트리 네트워크 그룹 확장(Bonjour 시작) 후 자식 구성(발견 호스트+기억 공유) 로그 검증 (제작자 제보 2026-07-23)
         if ProcessInfo.processInfo.environment["TF_TREE_NETWORK"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { wc.debugExpandNetwork() }

@@ -12,6 +12,8 @@ final class VolumeMonitor {
     static let changed = Notification.Name("TFVolumesChanged")
 
     private(set) var ejectableRoots: Set<URL> = []
+    /// 비로컬(네트워크) 볼륨 루트 — 동기 리스팅으로 내려가면 죽은 마운트에서 메인 스레드가 얼음(§3)
+    private(set) var nonLocalRoots: Set<URL> = []
 
     private init() {
         let center = NSWorkspace.shared.notificationCenter
@@ -29,12 +31,19 @@ final class VolumeMonitor {
         ejectableRoots.contains(url.standardizedFileURL)
     }
 
+    /// 이 URL이 네트워크 볼륨 루트인가 — 트리 새로 고침이 그 아래로 안 내려가게(죽은 마운트 행 방지).
+    /// 역시 순수 메모리 비교(제작자 제보 2026-07-25 트리 새로 고침).
+    func isNonLocal(_ url: URL) -> Bool {
+        nonLocalRoots.contains(url.standardizedFileURL)
+    }
+
     /// 마운트/언마운트 시 스냅숏 재계산 — 열거·stat는 오프메인(죽은 네트워크 마운트를 백그라운드에 격리).
     private func refresh() {
         Task.detached {
-            let roots = VolumeMonitor.computeOffMain()
+            let snapshot = VolumeMonitor.computeOffMain()
             await MainActor.run {
-                VolumeMonitor.shared.ejectableRoots = roots
+                VolumeMonitor.shared.ejectableRoots = snapshot.ejectable
+                VolumeMonitor.shared.nonLocalRoots = snapshot.nonLocal
                 NotificationCenter.default.post(name: VolumeMonitor.changed, object: nil)
             }
         }
@@ -43,7 +52,7 @@ final class VolumeMonitor {
     /// 실측 판정식(2026-07-25 DMG 실측): `isVolume && (ejectable || removable || 비로컬)`.
     /// 부트'/'·Data(ejectable=false·local=true)는 자동 제외, USB/외장/디스크이미지/네트워크는 포함.
     /// nil 안전 스펠링(QC 지적): 모든 비교를 명시 `== true`/`== false`로 — try? 실패(v=nil)는 전부 비추출.
-    nonisolated private static func computeOffMain() -> Set<URL> {
+    nonisolated private static func computeOffMain() -> (ejectable: Set<URL>, nonLocal: Set<URL>) {
         let keys: [URLResourceKey] = [.isVolumeKey, .volumeIsEjectableKey,
                                       .volumeIsRemovableKey, .volumeIsLocalKey]
         // .skipHiddenVolumes — 시스템 마운트(cryptex·CoreSimulator·autofs 등)를 배제해 트리(buildLocalLocations)와
@@ -51,13 +60,15 @@ final class VolumeMonitor {
         let volumes = FileManager.default.mountedVolumeURLs(
             includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
         var roots: Set<URL> = []
+        var remote: Set<URL> = []
         for u in volumes {
             guard let v = try? u.resourceValues(forKeys: Set(keys)), v.isVolume == true else { continue }
             if v.volumeIsEjectable == true || v.volumeIsRemovable == true || v.volumeIsLocal == false {
                 roots.insert(u.standardizedFileURL)
             }
+            if v.volumeIsLocal == false { remote.insert(u.standardizedFileURL) }
         }
-        return roots
+        return (roots, remote)
     }
 }
 
