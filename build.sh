@@ -9,6 +9,9 @@
 # TF_SIGN_IDENTITY="인증서 이름" 을 지정하면 설치 전에 재서명합니다 —
 # ad-hoc 서명은 빌드마다 지문이 바뀌어 전체 디스크 접근 승인이 풀리는데,
 # 자가 서명 인증서로 고정하면 재빌드에도 승인이 유지됩니다(README 각주).
+#
+# 설치(-i)를 마치면 빌드 캐시(build/ 통째로, 약 1.4GB)를 지웁니다 — 캐시가 깨져서
+# 빌드가 실패하는 일을 없애기 위함(제작자 지시 2026-07-28). 다음 빌드는 전체 재빌드.
 
 set -eu
 cd "$(dirname "$0")"
@@ -21,7 +24,7 @@ for arg in "$@"; do
         -d|--debug)   CONFIG=Debug ;;
         -i|--install) INSTALL=1 ;;
         -r|--run)     RUN=1 ;;
-        -h|--help)    sed -n '2,12p' "$0" | cut -c 3-; exit 0 ;;
+        -h|--help)    sed -n '2,15p' "$0" | cut -c 3-; exit 0 ;;
         *) echo "알 수 없는 옵션: $arg  (도움말: ./build.sh -h)" >&2; exit 2 ;;
     esac
 done
@@ -57,6 +60,17 @@ fi
 if [ "$RUN" = 1 ]; then
     echo "▶︎ 실행: $TARGET"
     open "$TARGET"
+fi
+
+# 캐시 삭제는 설치한 경우에만 — -i 없이 지우면 방금 만든 앱까지 사라지고,
+# -r 로 그 자리에서 실행 중인 앱은 실행 파일이 사라져 죽는다.
+# build/ 통째로 지운다(.gitignore 대상) — 옛 빌드 방식이 남긴 build/ddr·build/Debug 같은
+# 잔재까지 한 번에 정리하려고. build/ 안에는 빌드 산출물 말고 아무것도 두지 말 것.
+if [ "$INSTALL" = 1 ]; then
+    echo "▶︎ 빌드 캐시 삭제: build/"
+    rm -rf build
+else
+    echo "▶︎ 빌드 캐시 유지 — 앱이 build/dd 안에 있음 (-i 로 설치하면 삭제)"
 fi
 
 echo "✓ 완료 — $TARGET"
