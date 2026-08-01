@@ -177,6 +177,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-keysim.png")
             }
         }
+        // TF_TERMINAL_BTOP=1 → btop 등 전체 화면 TUI의 시작 렌더 진단 (제작자 제보 2026-08-01)
+        // 버퍼 채움을 50ms 간격으로 로그해 "빈 박스" 구간을 ms 단위로 특정하고, 같은 시점 스냅숏과 대조한다.
+        // 동기화 출력(DEC 2026) 듀티와 터미널 크기 재협상 횟수도 함께 기록 — 표시 지연의 3대 용의자를 한 번에 가른다.
+        if ProcessInfo.processInfo.environment["TF_TERMINAL_BTOP"] == "1" {
+            let preview = { [weak wc] in
+                wc?.contentViewController?.children
+                    .compactMap { $0 as? NSSplitViewController }.first?
+                    .splitViewItems.last?.viewController as? PreviewViewController
+            }
+            // 터미널을 크게 — 프레임이 커야 청크가 많아져 표시 지연이 드러난다
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                guard let window = wc.window, let screen = window.screen ?? NSScreen.main else { return }
+                window.setFrame(screen.visibleFrame, display: true, animate: false)
+                if let split = wc.contentViewController?.children
+                    .compactMap({ $0 as? NSSplitViewController }).first?.splitView {
+                    let dividers = split.arrangedSubviews.count - 1
+                    if dividers >= 1 { split.setPosition(split.bounds.width * 0.28, ofDividerAt: dividers - 1) }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { preview()?.debugShowTerminal() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { preview()?.debugTrackTerminalSize(seconds: 8.0) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { preview()?.debugTerminalKeySim("btop") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { preview()?.debugSampleSyncDuty(seconds: 6.0) }
+            // btop 입력 이후 경과 시간별 버퍼 채움 — 빈 박스 구간의 시작·끝을 ms 단위로 특정
+            for ms in stride(from: 50, through: 1500, by: 50) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5 + Double(ms) / 1000.0) {
+                    preview()?.debugLogTerminalFill("t\(ms)")
+                }
+            }
+            // 버퍼와 화면이 어긋나는지 대조할 스냅숏(빈 박스 구간 / 직후 / 정상화 후)
+            for ms in [300, 400, 3000] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5 + Double(ms) / 1000.0) {
+                    Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-btop-t\(ms).png")
+                }
+            }
+        }
         // TF_TERMINAL_SYNC=1 → vi 실행 중 "현재 폴더로 이동" = 새 탭 생성·cd 검증
         if ProcessInfo.processInfo.environment["TF_TERMINAL_SYNC"] == "1" {
             let preview = { [weak wc] in

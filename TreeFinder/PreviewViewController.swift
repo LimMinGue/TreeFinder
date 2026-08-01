@@ -1313,6 +1313,79 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         }
     }
 
+    /// TF_TERMINAL_BTOP=1 — btop 렌더 진단: 에뮬레이터 버퍼(정답)를 로그로 덤프해
+    /// 같은 시점의 화면 스냅숏과 대조한다(버퍼 정상 + 화면 누락 = 표시 경로 문제).
+    func debugDumpTerminalBuffer(_ tag: String) {
+        guard let terminal = terminalView?.getTerminal() else { return }
+        NSLog("TF_BTOP_BUF [%@] cols=%d rows=%d sync=%d",
+              tag, terminal.cols, terminal.rows, terminal.synchronizedOutputActive ? 1 : 0)
+        for row in 0..<terminal.rows {
+            let text = terminal.getLine(row: row)?.translateToString(trimRight: true) ?? ""
+            NSLog("TF_BTOP_BUF [%@] %2d|%@", tag, row, text)
+        }
+    }
+
+    /// TF_TERMINAL_BTOP=1 — 동기화 출력(DEC 2026) 플래그 듀티 사이클 실측.
+    /// PTY 실측상 동기화 구간은 1초당 0.3ms(0.03%)뿐 — 그보다 크면 플래그가 눌러붙은 것.
+    func debugSampleSyncDuty(seconds: Double) {
+        guard let terminal = terminalView?.getTerminal() else { return }
+        var samples = 0, active = 0, longestRun = 0, run = 0
+        let interval = 0.005
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { timer in
+            samples += 1
+            if terminal.synchronizedOutputActive {
+                active += 1; run += 1; longestRun = max(longestRun, run)
+            } else { run = 0 }
+            if Double(samples) * interval >= seconds {
+                timer.invalidate()
+                NSLog("TF_BTOP_SYNC 표본=%d 켜짐=%d (%.1f%%) 최장연속=%.0fms",
+                      samples, active, Double(active) / Double(samples) * 100,
+                      Double(longestRun) * interval * 1000)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// TF_TERMINAL_BTOP=1 — 버퍼 채움 정도(공백 아닌 셀 수)를 로그. 스냅숏과 대조해
+    /// "버퍼엔 있는데 화면엔 없는" 구간을 시간축으로 특정한다.
+    func debugLogTerminalFill(_ tag: String) {
+        guard let terminal = terminalView?.getTerminal() else { return }
+        var filled = 0
+        var digits = 0
+        for row in 0..<terminal.rows {
+            let text = terminal.getLine(row: row)?.translateToString(trimRight: true) ?? ""
+            filled += text.count { $0 != " " }
+            digits += text.count { $0.isNumber }
+        }
+        var maxLen = 0
+        for row in 0..<terminal.rows {
+            maxLen = max(maxLen, terminal.getLine(row: row)?.translateToString(trimRight: true).count ?? 0)
+        }
+        NSLog("TF_BTOP_FILL [%@] 채움=%d 숫자=%d cols=%d 최장줄=%d sync=%d",
+              tag, filled, digits, terminal.cols, maxLen, terminal.synchronizedOutputActive ? 1 : 0)
+    }
+
+    /// TF_TERMINAL_BTOP=1 — 터미널이 셸에 알리는 크기(cols×rows)가 열린 뒤에도 계속 바뀌는지 추적.
+    /// 크기가 바뀔 때마다 셸/앱은 SIGWINCH를 받아 화면을 통째로 다시 그린다(btop = 박스부터 재구성).
+    func debugTrackTerminalSize(seconds: Double) {
+        guard let terminal = terminalView?.getTerminal() else { return }
+        var last = (cols: 0, rows: 0)
+        var changes: [String] = []
+        let start = Date()
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { timer in
+            let now = (cols: terminal.cols, rows: terminal.rows)
+            if now != last {
+                changes.append(String(format: "%.0fms:%dx%d", Date().timeIntervalSince(start) * 1000, now.cols, now.rows))
+                last = now
+            }
+            if Date().timeIntervalSince(start) >= seconds {
+                timer.invalidate()
+                NSLog("TF_BTOP_SIZE 변경 %d회 — %@", changes.count, changes.joined(separator: " → "))
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
     func debugZoomIn() { zoomIn() }   // TF_ZOOM_TEST=1 스냅숏 검증용
 
     func debugMarkdownSaveTest() {   // TF_MD_SAVE_TEST=1 — 편집 주입 후 저장 경로 E2E 검증
