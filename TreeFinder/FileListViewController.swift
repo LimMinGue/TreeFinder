@@ -346,6 +346,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     private var filterText = ""
     private var searchTask: Task<Void, Never>?
     private var searchResults: [FileItem]?   // nil = 검색 아님(현재 폴더). 값이 있으면 하위 트리 검색 결과
+    /// 검색 기준 폴더의 **조상 심링크까지 푼** 경로 — Spotlight 결과 경로와 표기를 맞춰 '들어있는 폴더'를 상대화한다.
+    /// 백그라운드에서 1회 계산(셀 그릴 때마다 파일시스템을 만지지 않기 위해).
+    private var searchBase: String?
     private var spotlightQuery: NSMetadataQuery?          // Spotlight 검색 (Finder 패리티 — 이름+내용)
     private var spotlightObserver: NSObjectProtocol?
     private let tableView = TFTableView()
@@ -721,8 +724,10 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         if let cached = browserChildrenCache[folder] { return cached }
         let showHidden = UserDefaults.standard.bool(forKey: SettingsKeys.showHidden)
         let options: FileManager.DirectoryEnumerationOptions = showHidden ? [] : [.skipsHiddenFiles]
+        // 심링크 폴더는 해석 후 열거 — 안 하면 오류 문구도 없이 빈 컬럼이 열린다(§32)
         let urls = (try? FileManager.default.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: DirectoryLister.resourceKeys, options: options)) ?? []
+            at: DirectoryLister.resolvedFolder(folder),
+            includingPropertiesForKeys: DirectoryLister.resourceKeys, options: options)) ?? []
         let items = DirectoryLister.sorted(urls.map(DirectoryLister.item(for:)))
         for item in items { browserItemByURL[item.url] = item }
         let childURLs = items.map(\.url)
@@ -1190,7 +1195,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     /// 마지막 세션 복원 — 소멸된 폴더는 걸러냄 (제작자 지시 2026-07-17)
     func restoreSession(tabPaths: [String], active: Int) {
-        let dirs = tabPaths.map { URL(fileURLWithPath: $0) }.filter {
+        // 심링크 경로로 저장된 탭(§32 이전 세션)은 isDirectory=false라 통째로 사라졌다 — 해석 창구 경유(§32)
+        let dirs = tabPaths.map { DirectoryLister.resolvedFolder(URL(fileURLWithPath: $0)) }.filter {
             (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
         }
         guard !dirs.isEmpty else { return }
@@ -1279,6 +1285,10 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     var isNetworkBrowse: Bool { directory == Self.networkURL }
 
     func show(directory: URL) {
+        // 심링크 폴더는 여기서 **한 번** 대상으로 해석한다(Finder 규약 — decisions §32). 이 한 줄이
+        // 목록 리스팅·FSEvents 감시 경로·크기 캐시 키·검색 스코프·탭 세션 저장까지 전부 실경로로 정렬한다
+        // (self.directory 대입은 앱 통틀어 이 함수 하나뿐 = 단일 초크포인트).
+        let directory = DirectoryLister.resolvedFolder(directory)
         onActivate?()
         if !navigatingViaHistory, let old = self.directory, old != directory {
             backStack.append(old)
@@ -1305,31 +1315,45 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         onDirectoryChange?(directory)
         loadTask = Task { [weak self] in
             var listed: [FileItem] = []
-            var failure: String?
-            var permissionDenied = false
+            var failure: Error?
             do {
                 listed = try await DirectoryLister.list(
                     directory, showHidden: UserDefaults.standard.bool(forKey: SettingsKeys.showHidden))
             } catch is CancellationError {
                 return
             } catch {
-                failure = String(format: L("Can't read this folder — %@"), error.localizedDescription)
-                // 휴지통 등 보호 폴더 = 전체 디스크 접근 필요 — 사유만 말고 해결법 안내 (제작자 제보 2026-07-17)
-                permissionDenied = (error as NSError).domain == NSCocoaErrorDomain
-                    && (error as NSError).code == NSFileReadNoPermissionError
-                if permissionDenied {
-                    failure! += "\n\n" + L("Allow TreeFinder under System Settings ▸ Privacy & Security ▸ Full Disk Access, then relaunch the app.")
-                }
+                failure = error
             }
             guard let self, !Task.isCancelled else { return }
             self.allItems = listed
             self.rebuildItems(scrollToTop: true)
-            self.messageLabel.stringValue = failure ?? ""
-            self.messageLabel.isHidden = (failure == nil)
-            self.fdaButton.isHidden = !permissionDenied
+            self.showListingFailure(failure)
             self.selectionDidSync()   // onSelect(nil) + 갤러리 미리보기 초기화
             self.requestFolderSizes()
         }
+    }
+
+    /// 리스팅 실패 표면화 단일 창구(규칙 4) — 폴더를 여는 경로(show)와 갱신 경로(reloadCurrentDirectory) 공용.
+    /// nil을 주면 이전 오류를 해제한다. 조용한 실패 금지: 갱신 실패를 삼키면 **사라진 폴더의 목록이 그대로 남고**
+    /// 그 위에서 만든 새 폴더·붙여넣기는 디스크에만 반영돼 사용자가 실패한 줄 알고 반복한다
+    /// (제작자 확정 2026-08-06: 목록을 비우고 배너 표시 — Finder는 배너를 안 띄우지만 정직함을 택함).
+    private func showListingFailure(_ error: Error?) {
+        guard let error else {
+            messageLabel.stringValue = ""
+            messageLabel.isHidden = true
+            fdaButton.isHidden = true
+            return
+        }
+        var text = String(format: L("Can't read this folder — %@"), error.localizedDescription)
+        // 휴지통 등 보호 폴더 = 전체 디스크 접근 필요 — 사유만 말고 해결법 안내 (제작자 제보 2026-07-17)
+        let permissionDenied = (error as NSError).domain == NSCocoaErrorDomain
+            && (error as NSError).code == NSFileReadNoPermissionError
+        if permissionDenied {
+            text += "\n\n" + L("Allow TreeFinder under System Settings ▸ Privacy & Security ▸ Full Disk Access, then relaunch the app.")
+        }
+        messageLabel.stringValue = text
+        messageLabel.isHidden = false
+        fdaButton.isHidden = !permissionDenied
     }
 
     /// 시스템 설정 ▸ 개인정보 보호 및 보안 ▸ 전체 디스크 접근 바로 열기
@@ -1527,9 +1551,11 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 ? DirectoryLister.recursiveNameSearch(
                     PathPasteboard.normalized(text), in: directory, showHidden: showHidden)
                 : DirectoryLister.sorted(urls.map(DirectoryLister.item(for:)))
+            let base = directory.resolvingSymlinksInPath().standardizedFileURL.path   // 여기서 1회(오프메인)
             if Task.isCancelled { return }
             await MainActor.run { [weak self] in
                 guard let self, self.filterText == text, self.directory == directory else { return }   // stale 결과 폐기
+                self.searchBase = base
                 self.searchResults = matches
                 self.rebuildItems(scrollToTop: true)
             }
@@ -1636,8 +1662,17 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     /// 충돌 회피 명명 — 덮어쓰기 절대 없음 ("이름 2", "이름 3"…)
+    /// 이름이 이미 쓰이고 있는가 — **링크를 따라가지 않는다**(lstat 기반, 규칙 4로 이름 충돌 판정 단일 창구).
+    /// `fileExists`는 대상을 따라가므로 **깨진 심링크를 "없다"고 보고**한다: 그 이름으로 rename하면
+    /// POSIX rename이 링크를 조용히 지우고 그 자리를 차지한다(실측 재현 — 링크 소실).
+    /// 복사·이동 계열은 반대로 오류 516(이미 존재)으로 실패해 "충돌 회피 명명"이 무력화된다.
+    static func nameIsTaken(atPath path: String) -> Bool {
+        var info = stat()
+        return lstat(path, &info) == 0
+    }
+
     static func availableURL(for proposed: URL) -> URL {
-        guard FileManager.default.fileExists(atPath: proposed.path) else { return proposed }
+        guard nameIsTaken(atPath: proposed.path) else { return proposed }
         let parent = proposed.deletingLastPathComponent()
         let ext = proposed.pathExtension
         let base = ext.isEmpty ? proposed.lastPathComponent : proposed.deletingPathExtension().lastPathComponent
@@ -1645,7 +1680,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         while true {
             let name = ext.isEmpty ? "\(base) \(index)" : "\(base) \(index).\(ext)"
             let candidate = parent.appendingPathComponent(name)
-            if !FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+            if !nameIsTaken(atPath: candidate.path) { return candidate }
             index += 1
         }
     }
@@ -1665,7 +1700,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     static func posixRename(_ url: URL, toName newName: String) throws -> URL {
         let name = diskName(fromDisplay: newName)   // 표시 '/' → 디스크 ':' (제작자 지시 2026-07-23)
         let destPath = url.deletingLastPathComponent().path + "/" + name
-        guard !FileManager.default.fileExists(atPath: destPath) else {
+        guard !nameIsTaken(atPath: destPath) else {   // 링크 미추종(깨진 심링크 조용한 덮어쓰기 방지)
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteFileExistsError,
                           userInfo: [NSLocalizedDescriptionKey: L("An item with the same name already exists.")])
         }
@@ -1889,14 +1924,30 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     /// 재생성해, 파일이 계속 수정되는 폴더에서 주기적 깜빡임이 됨(제작자 제보 2026-07-23, Finder 규약).
     /// 크기 캐시 무효화·재스캔도 구성 변화 때만(메타 변경마다 대형 폴더 재스캔 방지).
     func reloadCurrentDirectory() {
-        guard let directory else { return }
-        if directory.isFileURL { onContentsChanged?(directory) }   // 트리 노드 자동 갱신 — 자체 변화 감지 내장
+        // 네트워크 브라우즈(비파일 센티널)는 이 경로를 타면 안 된다 — 실측상 contentsOfDirectory가 오류 260을
+        // 던지므로, 아래 오류 표면화가 가상 목록 위에 배너를 띄우게 된다(지금까진 try?가 우연히 막고 있었다).
+        guard let directory, directory.isFileURL else { return }
+        onContentsChanged?(directory)   // 트리 노드 자동 갱신 — 자체 변화 감지 내장
         loadTask?.cancel()
         loadTask = Task { [weak self] in
-            guard let listed = try? await DirectoryLister.list(
-                directory, showHidden: UserDefaults.standard.bool(forKey: SettingsKeys.showHidden))
-            else { return }
+            let listed: [FileItem]
+            do {
+                listed = try await DirectoryLister.list(
+                    directory, showHidden: UserDefaults.standard.bool(forKey: SettingsKeys.showHidden))
+            } catch is CancellationError {
+                return
+            } catch {
+                // 갱신 실패(폴더 삭제·권한 상실 등)를 삼키면 사라진 목록이 그대로 남는다 — show()와 동일하게 표면화
+                guard let self, !Task.isCancelled else { return }
+                self.allItems = []
+                self.rebuildItems()
+                self.showListingFailure(error)
+                self.pendingRenameURL = nil          // 실패했으면 이름변경 진입 예약도 폐기(다음 폴더로 새지 않게)
+                if self.viewStyle == .columns { self.reloadBrowser() }   // 컬럼 뷰에 stale 컬럼이 남지 않게
+                return
+            }
             guard let self, !Task.isCancelled else { return }
+            self.showListingFailure(nil)   // 이전 실패 배너 해제
             let oldItems = self.items
             self.allItems = listed
             let newItems = self.computeItems()
@@ -1974,6 +2025,14 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     /// 파일 열기 단일 경로(더블클릭·⌘O 공용) — .sh는 앱 연결 대신 우측 터미널 패널에서 실행 (제작자 지시 2026-07-21)
     private func openFile(_ url: URL) {
+        // Finder 별칭(alias) 파일이 폴더를 가리키면 앱 안에서 연다 (제작자 확정 2026-08-06).
+        // 그냥 두면 NSWorkspace.open이 Finder에 넘겨 파일 매니저 밖으로 튕기고, 죽은 볼륨 별칭은
+        // false만 돌려주고 아무 일도 안 일어난다(조용한 실패 — 둘 다 실측).
+        if let target = DirectoryLister.aliasTarget(url),
+           (try? target.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+            show(directory: target)
+            return
+        }
         if url.pathExtension.lowercased() == "sh", let onRunScript {
             onRunScript(url)
         } else {
@@ -2337,7 +2396,13 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     @objc func newTextDocument(_ sender: Any?) {
         guard let directory, directory.isFileURL else { return }
         let dest = Self.availableURL(for: directory.appendingPathComponent("untitled.txt"))
-        guard FileManager.default.createFile(atPath: dest.path, contents: Data()) else { return }
+        // createFile은 실패를 Bool로만 알린다 — 삼키면 "눌러도 아무 일도 안 일어나는" 조용한 실패가 된다
+        guard FileManager.default.createFile(atPath: dest.path, contents: Data()) else {
+            reportError(NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError,
+                                userInfo: [NSLocalizedDescriptionKey:
+                                            String(format: L("Can't create “%@”."), dest.lastPathComponent)]))
+            return
+        }
         fileUndoManager.registerUndo(withTarget: self) { target in
             let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             if size == 0 { try? FileManager.default.removeItem(at: dest) }   // 내용이 생겼으면 지우지 않음
@@ -2480,6 +2545,13 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         return true
     }
 
+    /// 드롭 가드 비교 키(규칙 4 — performDrop·runStackDrop 공용): 심링크 해석(§32) + 표준화 + NFC.
+    /// 셋 다 필요하다 — 링크/실경로 표기 차이는 "같은 폴더 no-op"과 "자기 하위 금지"를 조용히 무력화하고,
+    /// 그 결과가 파일 개명(a.txt → a 2.txt)이나 중첩 폴더 폭주로 나타난다(실측).
+    private static func dropKey(_ url: URL) -> String {
+        PathPasteboard.normalized(DirectoryLister.resolvedFolder(url).standardizedFileURL.path)
+    }
+
     private func sameVolume(_ a: URL, _ b: URL) -> Bool {
         guard let idA = (try? a.resourceValues(forKeys: [.volumeIdentifierKey]))?.volumeIdentifier,
               let idB = (try? b.resourceValues(forKeys: [.volumeIdentifierKey]))?.volumeIdentifier else { return false }
@@ -2487,17 +2559,24 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     func performDrop(_ sources: [URL], into target: URL, forceCopy: Bool, stackSource: DropStackView? = nil) {
+        // 타깃이 심링크 폴더면 먼저 해석한다(§32) — 안 하면 아래 가드 3개가 전부 어긋난다(실측):
+        // ① sameVolume이 링크가 있는 볼륨을 봐서 "다른 볼륨=복사"가 이동으로 뒤집힘 → **원본 소실**
+        // ② 같은 폴더 no-op 판정 실패 → moveItem이 충돌 회피 명명을 타 'a.txt' → 'a 2.txt' 개명
+        // ③ 자기 하위 금지 판정(문자열 접두) 실패 → 자기 자신 링크에 복사 시 177단 중첩 폴더 잔해
+        let target = DirectoryLister.resolvedFolder(target)
         // 드롭스택 출처 = 이동/복사 선택 메뉴 경유 (제작자 확정 2026-07-23 — 암묵 이동 금지)
         if let stack = stackSource {
             presentStackDropMenu(sources, into: target, stack: stack)
             return
         }
         var moving = false
+        let targetKey = Self.dropKey(target)
         let items: [FileOperationEngine.Item] = sources.compactMap { source in
-            guard source != target else { return nil }
-            guard !target.path.hasPrefix(source.path + "/") else { return nil }   // 자기 하위로 이동 금지
+            let sourceKey = Self.dropKey(source)
+            guard sourceKey != targetKey else { return nil }
+            guard !targetKey.hasPrefix(sourceKey + "/") else { return nil }       // 자기 하위로 이동 금지
             let isMove = !forceCopy && sameVolume(source, target)                 // 1.1.10 규약
-            guard !(isMove && source.deletingLastPathComponent() == target) else { return nil }   // 같은 폴더 = no-op
+            guard !(isMove && Self.dropKey(source.deletingLastPathComponent()) == targetKey) else { return nil }   // 같은 폴더 = no-op
             if isMove { moving = true }
             return transferItem(source: source, into: target, isMove: isMove)
         }
@@ -2546,6 +2625,17 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     func debugRunStackDrop(_ sources: [URL], into target: URL, move: Bool, stack: DropStackView) {
         runStackDrop(sources, into: target, move: move, stack: stack)
     }
+
+    /// TF_SYMLINK — 드래그앤드롭과 동일 경로(performDrop)로 심링크 폴더에 드롭 (볼륨 오판·no-op 가드 실측)
+    func debugPerformDrop(_ sources: [URL], into target: URL) {
+        performDrop(sources, into: target, forceCopy: false)
+    }
+
+    /// TF_SYMLINK — 현재 목록 항목 이름(리스팅 성공 여부 실측)
+    func debugItemNames() -> [String] { items.map(\.name) }
+
+    /// TF_LISTING_FAIL — 오류 배너 문구(숨김이면 빈 문자열)
+    func debugMessageText() -> String { messageLabel.isHidden ? "" : messageLabel.stringValue }
     #endif
 
     /// 명시 선택된 이동/복사 실행 — 이동은 크로스 볼륨도 이동(FileManager.moveItem = 복사+원본 제거,
@@ -2555,12 +2645,12 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     private func runStackDrop(_ sources: [URL], into target: URL, move: Bool, stack: DropStackView) {
         // 같은 폴더 판정은 정규화 경로 비교 — URL ==는 후행 슬래시·NFC/NFD 표기 차이에 오판,
         // 어긋나면 이동이 충돌 회피 명명을 타고 "이름 2" 개명이 됨 (적대검증 반영)
-        let targetKey = PathPasteboard.normalized(target.standardizedFileURL.path)
+        let targetKey = Self.dropKey(target)
         let items: [FileOperationEngine.Item] = sources.compactMap { source in
-            guard source != target else { return nil }
-            guard !target.path.hasPrefix(source.path + "/") else { return nil }   // 자기 하위로 이동 금지
-            let parentKey = PathPasteboard.normalized(
-                source.deletingLastPathComponent().standardizedFileURL.path)
+            let sourceKey = Self.dropKey(source)
+            guard sourceKey != targetKey else { return nil }
+            guard !targetKey.hasPrefix(sourceKey + "/") else { return nil }   // 자기 하위로 이동 금지
+            let parentKey = Self.dropKey(source.deletingLastPathComponent())
             guard !(move && parentKey == targetKey) else { return nil }   // 같은 폴더 이동 = no-op
             return transferItem(source: source, into: target, isMove: move)
         }
@@ -2630,10 +2720,14 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     /// 현재 폴더 직속이거나 검색 중이 아니면 nil(위치 생략).
     private func searchLocationText(for item: FileItem) -> String? {
         guard searchResults != nil, let directory, directory.isFileURL else { return nil }
-        let base = directory.standardizedFileURL.path
         let parent = item.url.deletingLastPathComponent().standardizedFileURL.path
-        guard parent != base else { return nil }
-        return parent.hasPrefix(base + "/") ? String(parent.dropFirst(base.count + 1)) : parent
+        // Spotlight(kMDItemPath)는 조상 심링크까지 푼 실경로를 준다 — 현재 폴더 표기와 다르면 상대화가 실패해
+        // 짧은 상대 경로 대신 전체 절대 경로가 뜬다. 두 표기 모두를 기준으로 시도한다(§32 후속).
+        for base in [directory.standardizedFileURL.path, searchBase].compactMap({ $0 }) {
+            if parent == base { return nil }
+            if parent.hasPrefix(base + "/") { return String(parent.dropFirst(base.count + 1)) }
+        }
+        return parent
     }
 
     /// 파일명(진하게) + 들어있는 폴더(회색·소형) 한 줄 조합 — 검색 결과 이름 셀용.

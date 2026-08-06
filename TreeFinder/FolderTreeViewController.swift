@@ -44,6 +44,9 @@ enum SidebarSymbols {
     }
 }
 
+/// 트리 노드는 **메인 스레드 전용** — 자식 리스팅이 동기라 원래부터 메인에서만 쓰였고(§3),
+/// 비로컬 볼륨 가드(VolumeMonitor)가 메인 격리 스냅숏이라 명시한다.
+@MainActor
 final class FolderNode {
     let url: URL
     let name: String
@@ -111,8 +114,13 @@ final class FolderNode {
     private func childDirectoryEntries() -> [(url: URL, label: Int, custom: Bool)] {
         let showHidden = UserDefaults.standard.bool(forKey: SettingsKeys.showHidden)
         let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .labelNumberKey]
+        // 심링크 폴더는 해석 후 열거 — 안 하면 자식 0개라 확장 화살표조차 안 생긴다(§32).
+        // **순서 주의**: 네트워크 볼륨 판정을 stat 이전에 한다. resolvedFolder는 대상 존재 확인(stat)을 하므로
+        // 먼저 부르면 죽은 마운트에서 이미 메인 스레드가 얼어 있다 — readlink만 하는 symlinkTarget으로 가드(§3).
+        if let target = DirectoryLister.symlinkTarget(url), VolumeMonitor.shared.isNonLocal(target) { return [] }
+        let listURL = DirectoryLister.resolvedFolder(url)
         let urls = (try? FileManager.default.contentsOfDirectory(
-            at: url, includingPropertiesForKeys: keys,
+            at: listURL, includingPropertiesForKeys: keys,
             options: showHidden ? [] : [.skipsHiddenFiles])) ?? []
         return urls.compactMap { u in
             let v = try? u.resourceValues(forKeys: Set(keys))
@@ -497,11 +505,19 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
 
     private var isRevealing = false
 
+    /// 경로가 루트 자신이거나 그 하위인가 — 루트가 "/"인 경우(후행 슬래시)도 안전하게 처리
+    private static func isUnder(_ path: String, _ rootPath: String) -> Bool {
+        path == rootPath || path.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/")
+    }
+
     /// View ▸ Expand to Open Folder — 탐색을 따라 트리를 펼치고 선택 (원본 1.1.2)
     func reveal(_ url: URL) {
-        guard let root = localLocations.first else { return }
-        let rootPath = root.url.path
-        guard url.path == rootPath || url.path.hasPrefix(rootPath + "/") else { return }   // 홈 트리 한정
+        // 홈뿐 아니라 **볼륨 루트까지** 후보 — 심링크가 홈 밖(다른 볼륨)을 가리켜도 트리가 따라온다
+        // (제작자 확정 2026-08-06, §32. 이 기기: ~/Documents → /Volumes/SSD_1T/Documents).
+        // 가장 긴 접두(= 가장 구체적인 루트)를 고른다 — 홈과 "/"가 동시에 맞으면 홈이 이긴다.
+        guard let root = localLocations
+            .filter({ Self.isUnder(url.path, $0.url.path) })
+            .max(by: { $0.url.path.count < $1.url.path.count }) else { return }
         isRevealing = true
         defer { isRevealing = false }
         var current = root

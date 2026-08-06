@@ -241,6 +241,16 @@
         }
       }
     },
+    "Can't create “%@”.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "‘%@’을(를) 만들 수 없습니다."
+          }
+        }
+      }
+    },
     "Check for Updates…": {
       "localizations": {
         "ko": {
@@ -807,6 +817,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "최근 수정한 사람"
+          }
+        }
+      }
+    },
+    "Original": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "원본"
           }
         }
       }

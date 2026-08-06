@@ -31,10 +31,16 @@ final class VolumeMonitor {
         ejectableRoots.contains(url.standardizedFileURL)
     }
 
-    /// 이 URL이 네트워크 볼륨 루트인가 — 트리 새로 고침이 그 아래로 안 내려가게(죽은 마운트 행 방지).
+    /// 이 URL이 네트워크 볼륨(루트 또는 그 **하위**)인가 — 동기 리스팅이 그 아래로 안 내려가게(죽은 마운트 행 방지).
     /// 역시 순수 메모리 비교(제작자 제보 2026-07-25 트리 새로 고침).
+    /// 하위까지 보는 이유: 심링크 해석(§32)으로 네트워크 볼륨 "안"의 경로가 직접 들어올 수 있다 — 루트 완전일치만
+    /// 보면 `/Volumes/공유/폴더`가 통과해 버린다.
     func isNonLocal(_ url: URL) -> Bool {
-        nonLocalRoots.contains(url.standardizedFileURL)
+        let path = url.standardizedFileURL.path
+        return nonLocalRoots.contains { root in
+            let rootPath = root.path
+            return path == rootPath || path.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/")
+        }
     }
 
     /// 마운트/언마운트 시 스냅숏 재계산 — 열거·stat는 오프메인(죽은 네트워크 마운트를 백그라운드에 격리).

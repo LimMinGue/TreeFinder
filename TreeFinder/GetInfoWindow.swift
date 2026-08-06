@@ -205,6 +205,8 @@ final class GetInfoWindowController: NSWindowController, NSWindowDelegate {
         }
         addRow(to: column, L("Size"), sizeValue)
         addRow(to: column, L("Where"), Self.locationText(for: url))
+        // 심링크·별칭이면 가리키는 원본 경로 (Finder 패리티, 제작자 확정 2026-08-06). 아니면 addRow가 nil을 건너뛴다.
+        addRow(to: column, L("Original"), DirectoryLister.originalPath(of: url))
         addRow(to: column, L("Created"), Self.dateOrNil(values?.creationDate))
         addRow(to: column, L("Modified"), Self.dateOrNil(values?.contentModificationDate))
 

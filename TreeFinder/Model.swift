@@ -168,6 +168,64 @@ enum DirectoryLister {
         return sorted(urls.map(item(for:)))
     }
 
+    /// 폴더로 "열려는" URL이 심링크면 대상 경로로 해석한다 — Finder 규약(제작자 확정 2026-08-06, decisions §32).
+    ///
+    /// **왜 필요한가(실측)**: URL 기반 `contentsOfDirectory(at:)`·`enumerator(at:)`는 디렉토리를 가리키는
+    /// 심링크에서 `NSPOSIXErrorDomain 20 "Not a directory"`로 **실패한다**(후행 슬래시·isDirectory:true를 줘도 동일).
+    /// 경로 기반 API는 정상 동작하므로, 링크를 따라가지 않는 이 앱은 심링크 폴더를 아예 열지 못했다
+    /// (이 기기의 `~/Documents`·`~/Downloads`가 실제 심링크 — 즐겨찾기 기본 항목이 오류였음).
+    ///
+    /// **해석 방식 = readlink 체인**(`resolvingSymlinksInPath()` 불채택): 대상을 stat 하지 않아 죽은
+    /// 네트워크 마운트에서도 즉시 끝나고(실측 0.035ms), 끊긴 링크도 대상 경로를 정직하게 돌려주며,
+    /// `/private/tmp`↔`/tmp` 치환으로 경로 표기가 흔들리지 않는다.
+    /// 끊긴 링크·순환 링크·파일을 가리키는 링크는 **원본 URL을 그대로** 돌려준다(기존 오류 경로 유지).
+    static func resolvedFolder(_ url: URL) -> URL {
+        guard let target = symlinkTarget(url) else { return url }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: target.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return url }   // 끊김·파일·순환 → 원본 유지
+        return target
+    }
+
+    /// 심링크가 가리키는 **후보** 경로 — readlink 체인만 돌고 대상은 **건드리지 않는다**(stat 0).
+    /// 링크가 아니거나 자기 자신으로 돌아오면 nil.
+    /// 죽은 네트워크 마운트를 가리킬 수 있는 자리(동기·메인 스레드 열거)에서는 **이걸로 먼저 판정**하고,
+    /// 통과한 뒤에야 `resolvedFolder`(대상 존재 확인 = stat 포함)를 불러야 한다 — 순서가 뒤집히면
+    /// 가드가 도는 시점엔 이미 stat이 끝나 §3 규약이 무력화된다(적대검증 지적).
+    static func symlinkTarget(_ url: URL) -> URL? {
+        guard url.isFileURL,
+              (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true else { return nil }
+        var current = url
+        for _ in 0..<8 {   // 체인 상한 — 순환 링크(A→B→A) 무한 루프 차단
+            guard (try? current.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true,
+                  let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: current.path)
+            else { break }
+            current = destination.hasPrefix("/")
+                ? URL(fileURLWithPath: destination)
+                : current.deletingLastPathComponent().appendingPathComponent(destination)
+        }
+        current = current.standardizedFileURL   // 상대 링크 결합에서 생긴 '..' 정리
+        return current == url ? nil : current
+    }
+
+    /// Finder 별칭(alias) 파일이 가리키는 대상 — 심링크와 달리 북마크 데이터라 전용 API가 필요하다.
+    /// **옵션 고정이 이 창구의 존재 이유**: `.withoutMounting`을 빼면 죽은 볼륨을 가리키는 별칭이
+    /// 조용히 마운트를 시도하고 인증 창이 뜬다(실측). 별칭이 아니거나 해석 실패면 nil.
+    static func aliasTarget(_ url: URL) -> URL? {
+        guard (try? url.resourceValues(forKeys: [.isAliasFileKey]))?.isAliasFile == true else { return nil }
+        return try? URL(resolvingAliasFileAt: url, options: [.withoutUI, .withoutMounting])
+    }
+
+    /// 심링크·별칭이 가리키는 원본 경로(표시용) — 정보 가져오기의 '원본:' 행. 둘 다 아니면 nil.
+    static func originalPath(of url: URL) -> String? {
+        if let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: url.path) {
+            return destination.hasPrefix("/")
+                ? destination
+                : url.deletingLastPathComponent().appendingPathComponent(destination).standardizedFileURL.path
+        }
+        return aliasTarget(url)?.standardizedFileURL.path
+    }
+
     /// 심링크는 리소스 키가 링크 자신을 보고하므로, 대상이 폴더인지는 링크를 따라가서 판정한다.
     /// (PLAYBOOK 2부 §5 — 폴더형 링크는 앱 안에서 폴더처럼 열려야 한다)
     static func resolvesToDirectory(_ url: URL, values: URLResourceValues?) -> Bool {
@@ -180,12 +238,15 @@ enum DirectoryLister {
     static func item(for url: URL) -> FileItem {
         let values = try? url.resourceValues(forKeys: Set(resourceKeys))
         let isPackage = values?.isPackage ?? false
+        let isDirectory = resolvesToDirectory(url, values: values) && !isPackage
         return FileItem(
             url: url,
             name: url.lastPathComponent,
-            isDirectory: resolvesToDirectory(url, values: values) && !isPackage,
+            isDirectory: isDirectory,
             isPackage: isPackage,
-            fileSize: values?.fileSize,
+            // 폴더는 크기를 SizeService가 채운다 — 심링크 폴더는 fileSize가 non-nil(링크 경로 문자열 길이)이라
+            // 그냥 두면 "폴더인데 25바이트"가 확정값처럼 뜨고 크기 정렬·선택 합계까지 오염된다(QC 위원 지적).
+            fileSize: isDirectory ? nil : values?.fileSize,
             dateModified: values?.contentModificationDate,
             dateCreated: values?.creationDate,
             kind: values?.localizedTypeDescription ?? "",
@@ -330,6 +391,56 @@ enum DirectoryLister {
         var rvClear = URLResourceValues(); rvClear.labelNumber = 0
         try? tagURL.setResourceValues(rvClear)
         assert((try? tagURL.resourceValues(forKeys: [.labelNumberKey]))?.labelNumber == 0, "label clear broken")
+
+        // 심링크 폴더 해석 (제작자 제보 2026-08-06 "심링크 폴더를 즐겨찾기에 등록하면 정상작동 안 함", §32)
+        let linkTarget = tmp.appendingPathComponent("링크대상")
+        try? fm.createDirectory(at: linkTarget, withIntermediateDirectories: true)
+        fm.createFile(atPath: linkTarget.appendingPathComponent("안의파일.txt").path, contents: Data(count: 7))
+        let absLink = tmp.appendingPathComponent("절대링크")
+        let relLink = tmp.appendingPathComponent("상대링크")
+        let chainLink = tmp.appendingPathComponent("체인링크")
+        let deadLink = tmp.appendingPathComponent("끊긴링크")
+        let fileLink = tmp.appendingPathComponent("파일링크")
+        try? fm.createSymbolicLink(atPath: absLink.path, withDestinationPath: linkTarget.path)
+        try? fm.createSymbolicLink(atPath: relLink.path, withDestinationPath: "링크대상")     // 상대 경로
+        try? fm.createSymbolicLink(atPath: chainLink.path, withDestinationPath: "상대링크")   // 링크 → 링크
+        try? fm.createSymbolicLink(atPath: deadLink.path, withDestinationPath: "/없는경로/xyz")
+        try? fm.createSymbolicLink(atPath: fileLink.path, withDestinationPath: "링크대상/안의파일.txt")
+        // URL 기반 열거는 심링크 폴더에서 실패한다(이 버그의 근본) — 해석 후에는 성공해야 한다
+        assert((try? fm.contentsOfDirectory(at: absLink, includingPropertiesForKeys: nil)) == nil,
+               "전제 붕괴: contentsOfDirectory(at: 심링크)가 성공했다 — 해석 로직 재검토 필요")
+        for link in [absLink, relLink, chainLink] {
+            let resolved = resolvedFolder(link)
+            assert(resolved.standardizedFileURL.path == linkTarget.standardizedFileURL.path,
+                   "심링크 해석 실패: \(link.lastPathComponent) → \(resolved.path)")
+            assert((try? fm.contentsOfDirectory(at: resolved, includingPropertiesForKeys: nil))?.count == 1,
+                   "해석된 경로로 열거가 안 된다: \(link.lastPathComponent)")
+        }
+        // 끊긴 링크·파일 링크·일반 폴더는 원본 그대로(엉뚱한 진입 금지)
+        assert(resolvedFolder(deadLink) == deadLink, "끊긴 링크는 원본 유지여야 한다")
+        assert(resolvedFolder(fileLink) == fileLink, "파일을 가리키는 링크는 원본 유지여야 한다")
+        assert(resolvedFolder(linkTarget) == linkTarget, "심링크가 아니면 그대로여야 한다")
+        // 순환 링크(A→B→A)에서 무한 루프에 빠지지 않는다
+        let cycleA = tmp.appendingPathComponent("순환A"), cycleB = tmp.appendingPathComponent("순환B")
+        try? fm.createSymbolicLink(atPath: cycleA.path, withDestinationPath: "순환B")
+        try? fm.createSymbolicLink(atPath: cycleB.path, withDestinationPath: "순환A")
+        assert(resolvedFolder(cycleA) == cycleA, "순환 링크는 원본 유지여야 한다")
+        // 심링크 폴더 행의 크기는 링크 자신의 바이트가 아니라 폴더 취급(SizeService가 채움)
+        let linkItem = item(for: absLink)
+        assert(linkItem.isDirectory && linkItem.fileSize == nil,
+               "심링크 폴더 행은 폴더 + 크기 nil이어야 한다: isDirectory=\(linkItem.isDirectory) size=\(String(describing: linkItem.fileSize))")
+
+        // 이름 충돌 판정은 링크를 따라가면 안 된다 — 따라가면 깨진 심링크를 "빈 이름"으로 보고
+        // POSIX rename이 그 링크를 조용히 지운다(제작자 지시 2026-08-06 보완, §32 후속). 실측 재현된 자리.
+        assert(!FileManager.default.fileExists(atPath: deadLink.path), "전제: 깨진 링크는 fileExists=false")
+        assert(FileListViewController.nameIsTaken(atPath: deadLink.path),
+               "깨진 심링크도 '이름이 이미 쓰임'으로 판정돼야 한다(lstat 기반)")
+        assert(FileListViewController.availableURL(for: deadLink).lastPathComponent != deadLink.lastPathComponent,
+               "깨진 심링크와 같은 이름은 충돌 회피 명명을 타야 한다")
+        // 원본(심링크 대상) 경로 표시 — 정보 가져오기 '원본:' 행 (제작자 확정 2026-08-06)
+        assert(originalPath(of: relLink) == linkTarget.standardizedFileURL.path,
+               "상대 심링크의 원본 경로 해석 실패: \(String(describing: originalPath(of: relLink)))")
+        assert(originalPath(of: linkTarget) == nil, "일반 폴더엔 원본 행이 없어야 한다")
 
         // 네트워크 위치 중복 병합 키 — 같은 공유의 3가지 URL 표기가 한 키로 (제작자 제보 2026-07-23 "home 2개")
         let variants = ["smb://user@NAS._smb._tcp.local/home", "smb://user@NAS.local./home", "smb://nas/home"]

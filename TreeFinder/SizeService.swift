@@ -17,7 +17,11 @@ actor SizeService {
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private let maxConcurrent = 2                                  // CPU/IO 포화 방지
 
-    private static let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+    /// **해석된** 홈 경로 — 아래 판정이 해석 경로로 들어오므로 제외 목록도 같은 좌표계여야 한다.
+    /// 미해석으로 두면 홈(또는 ~/Library)이 심링크 뒤에 있는 구성에서 접두 비교가 어긋나
+    /// **제외가 통째로 풀린다**(적대검증 실측 지적 — 이 기기가 이미 ~/Documents를 다른 볼륨으로 링크한 계열).
+    private static let homePath = FileManager.default.homeDirectoryForCurrentUser
+        .resolvingSymlinksInPath().path
     /// TCC 함정(PLAYBOOK 2부 §1-2): 이 경로들로는 절대 하강하지 않는다 — "다른 앱 데이터" 프롬프트 방지
     /// ponytail: 경로 prefix 판정 — 심링크 우회는 로컬 홈 트리 전제라 v1 범위 밖
     static let excludedRoots = [homePath + "/Library", homePath + "/.Trash"]
@@ -34,7 +38,10 @@ actor SizeService {
         let key = Self.key(url)
         if let cached = cache[key] { return cached }
         if let task = inflight[key] { return await task.value }
-        if Self.isExcluded(url.path) {
+        // 제외 판정은 **경로 전체 해석** 기준 — 마지막 성분만 풀면 '조상 성분이 심링크'인 경로
+        // (예: /tmp/링크/Caches, 링크가 ~/Library를 가리킴)로 TCC 제외 구역에 하강할 수 있다.
+        // 여기는 오프메인 actor라 대상 stat이 UI를 막지 않는다(§3 제약 밖 — 실측 0.002ms).
+        if Self.isExcluded(url.resolvingSymlinksInPath().path) {
             cache[key] = .excluded
             return .excluded
         }
@@ -81,6 +88,9 @@ actor SizeService {
         var total: Int64 = 0
         var partial = false
         let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey]
+        // 심링크 폴더는 해석 후 스캔 — 안 하면 enumerator가 루트를 못 열어 항상 0바이트로 끝난다(§32).
+        // 경로 전체 해석(오프메인이라 허용) — 아래 isExcluded 재판정과 같은 기준이어야 우회가 안 생긴다.
+        let root = root.resolvingSymlinksInPath()
         guard let enumerator = FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: keys, options: [],
             errorHandler: { _, _ in partial = true; return true }) else {
@@ -116,6 +126,13 @@ actor SizeService {
         fm.createFile(atPath: tmp.appendingPathComponent("a.bin").path, contents: Data(count: 1000))
         fm.createFile(atPath: sub.appendingPathComponent("b.bin").path, contents: Data(count: 234))
         assert(scan(tmp) == .measured(1234), "recursive sum broken: \(scan(tmp))")
+
+        // 심링크 폴더도 대상 크기로 계산돼야 한다 — 해석 전엔 항상 0바이트였음 (제작자 제보 2026-08-06, §32)
+        let link = fm.temporaryDirectory.appendingPathComponent("tf-size-link-\(ProcessInfo.processInfo.processIdentifier)")
+        try? fm.removeItem(at: link)
+        try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: tmp.path)
+        defer { try? fm.removeItem(at: link) }
+        assert(scan(link) == .measured(1234), "심링크 폴더 크기 스캔 실패: \(scan(link))")
     }
     #endif
 }

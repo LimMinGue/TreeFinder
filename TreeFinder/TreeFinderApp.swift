@@ -436,6 +436,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-tree.png")
             }
         }
+        // TF_LISTING_FAIL=delete|chmod → (TF_START_DIR 병용) 보고 있는 폴더가 사라지거나 권한을 잃었을 때
+        // 갱신 실패가 표면화되는지 실측 (제작자 확정 2026-08-06: 목록 비우고 오류 배너 — 이전엔 스테일 목록이 그대로 남았다)
+        if let failMode = ProcessInfo.processInfo.environment["TF_LISTING_FAIL"] {
+            let target = startDirectory
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                NSLog("LISTING_FAIL before 항목=[%@] 배너=%@",
+                      wc.debugItemNames().joined(separator: ", "), wc.debugMessageText())
+                // 앱 밖에서 벌어진 일을 재현 — FSEvents가 갱신을 유발한다
+                if failMode == "delete" {
+                    try? FileManager.default.removeItem(at: target)   // 삭제는 FSEvents가 갱신을 유발
+                } else {
+                    // 권한 변경은 FSEvents 대상이 아니다(디렉터리 이벤트만 감시) — 사용자가 파일 조작을 해
+                    // 갱신이 도는 순간을 재현(감사에서 "새 폴더를 만들었는데 화면이 그대로"였던 그 경로)
+                    try? FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: target.path)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { wc.debugReload() }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+                NSLog("LISTING_FAIL after 항목=[%@] 배너=%@",
+                      wc.debugItemNames().joined(separator: ", "), wc.debugMessageText())
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-listingfail.png")
+                if failMode != "delete" {   // 검증 픽스처 원복(권한 되돌리기) — 정리 못 하면 폴더가 잠긴 채 남는다
+                    try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+                }
+            }
+        }
+        // TF_SYMLINK=<링크폴더이름> → (TF_START_DIR=부모 폴더 병용) 심링크 폴더 전 경로 실측 (제작자 제보 2026-08-06, §32):
+        // ① 부모 목록에서 링크 행의 크기 표시 ② 트리 노드 자식(확장 화살표 근거) ③ 링크 폴더 진입 시 해석된 경로·항목
+        // ④ 드롭 타깃 해석(같은 폴더 no-op — 해석 전엔 원본이 "이름 2"로 개명되던 자리) ⑤ 렌더 스냅숏
+        if let linkName = ProcessInfo.processInfo.environment["TF_SYMLINK"] {
+            let parent = startDirectory
+            let link = parent.appendingPathComponent(linkName)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { wc.debugRevealTree(parent) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+                NSLog("SYMLINK 부모목록=[%@] 크기셀=%@ 트리자식=[%@]",
+                      wc.debugItemNames().joined(separator: ", "),
+                      wc.debugSizeCellText(named: linkName),
+                      wc.debugTreeChildNames(of: link).joined(separator: ", "))
+            }
+            // 링크 폴더 안의 파일을 **링크 표기 경로**로 그 폴더 자신에게 드롭 = 같은 폴더 no-op이어야 한다.
+            // (해석 전엔 '문서.txt' → '문서 2.txt' 개명이 일어났다 — 검증에서 실제로 재현된 자리)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
+                let inside = ((try? FileManager.default.contentsOfDirectory(atPath: link.path)) ?? [])
+                    .sorted().first.map { link.appendingPathComponent($0) }
+                if let inside { wc.debugPerformDrop(inside, into: link) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                NSLog("SYMLINK 드롭후 대상폴더=[%@]",
+                      ((try? FileManager.default.contentsOfDirectory(atPath: link.path)) ?? [])
+                        .sorted().joined(separator: ", "))
+                wc.debugShow(link)   // 즐겨찾기·트리 클릭과 동일 경로(show)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) {
+                NSLog("SYMLINK 진입경로=%@ 항목=[%@]",
+                      wc.debugCurrentDirectory(), wc.debugItemNames().joined(separator: ", "))
+                NSLog("SYMLINK 트리선택=%@", wc.debugTreeSelectedName())
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-symlink.png")
+            }
+        }
         // TF_TREE_MANUAL=<하위폴더>/<대상폴더> → (TF_START_DIR 병용, 홈 아래 경로) 트리를 그 하위까지 펼친 뒤
         // 앱 바깥에서 대상 폴더 이름을 바꿔(터미널·타 앱 재현) ① 옛 이름이 남는지(버그 재현)
         // ② refreshTree()로 고쳐지는지 ③ 우클릭 메뉴 구성에 "새로 고침"이 있는지 로그 검증 (제작자 제보 2026-07-25)
