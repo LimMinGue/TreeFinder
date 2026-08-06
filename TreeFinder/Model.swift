@@ -392,6 +392,23 @@ enum DirectoryLister {
         try? tagURL.setResourceValues(rvClear)
         assert((try? tagURL.resourceValues(forKeys: [.labelNumberKey]))?.labelNumber == 0, "label clear broken")
 
+        // 권한 오류 원인 판별 — TCC(전체 디스크 접근으로 풀림) vs 폴더 자체 권한 (제작자 지시 2026-08-06, §33).
+        // 실측 근거: TCC=EPERM(1) · 폴더 권한=EACCES(13), 상위 코드는 둘 다 257.
+        func permissionError(_ posix: Int32) -> NSError {
+            NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError,
+                    userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(posix))])
+        }
+        assert(FileListViewController.deniedByPrivacyPermission(permissionError(EPERM)),
+               "EPERM은 TCC로 판정해 전체 디스크 접근을 안내해야 한다(휴지통 케이스 — 2026-07-17 회귀 방지)")
+        assert(!FileListViewController.deniedByPrivacyPermission(permissionError(EACCES)),
+               "EACCES는 폴더 권한 문제라 전체 디스크 접근을 안내하면 안 된다")
+        assert(FileListViewController.deniedByPrivacyPermission(
+                NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError)),
+               "underlying이 없으면 보수적으로 TCC 판정(종전 동작 유지)")
+        assert(!FileListViewController.deniedByPrivacyPermission(
+                NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError)),
+               "권한 오류가 아니면 전체 디스크 접근 안내 금지")
+
         // 심링크 폴더 해석 (제작자 제보 2026-08-06 "심링크 폴더를 즐겨찾기에 등록하면 정상작동 안 함", §32)
         let linkTarget = tmp.appendingPathComponent("링크대상")
         try? fm.createDirectory(at: linkTarget, withIntermediateDirectories: true)

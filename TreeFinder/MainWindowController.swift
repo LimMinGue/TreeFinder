@@ -467,6 +467,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
     // TF_SYMLINK — 심링크 폴더 진입·트리 자식·크기 표시·드롭 타깃 해석 실측 (제작자 제보 2026-08-06, §32)
     func debugItemNames() -> [String] { listController?.debugItemNames() ?? [] }
     func debugMessageText() -> String { listController?.debugMessageText() ?? "" }   // TF_LISTING_FAIL
+    func debugFDAButtonVisible() -> Bool { listController?.debugFDAButtonVisible() ?? false }   // TF_LISTING_FAIL
     /// TF_LISTING_FAIL — 파일 조작 후 갱신과 같은 경로를 직접 구동(권한 변경은 FSEvents가 안 알려 준다)
     func debugReload() { listController?.reloadCurrentDirectory() }
     func debugShow(_ url: URL) { listController?.show(directory: url) }

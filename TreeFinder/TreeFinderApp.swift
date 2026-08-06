@@ -436,6 +436,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-tree.png")
             }
         }
+        // TF_FDA_PROBE=1 → 권한 거부의 두 원인(TCC / POSIX)이 오류로 구분되는지 실측 (제작자 지시 2026-08-06).
+        // 결과(실측 확정): TCC 거부 = NSCocoaError 257 / **NSPOSIXErrorDomain 1(EPERM)**,
+        //                  POSIX 권한 거부 = NSCocoaError 257 / **NSPOSIXErrorDomain 13(EACCES)**.
+        //
+        // **[경고 — 이 훅을 다시 쓸 때 반드시 읽을 것]**
+        // ① `open`으로 띄워야 TCC 거부가 재현된다(셸 직접 실행은 부모 터미널의 전체 디스크 접근을 상속 — 실측).
+        // ② 그런데 **Debug 빌드는 설치본과 번들 ID가 같아서(com.limmingue.TreeFinder), `open` 실험이
+        //    실제 TreeFinder 앱의 권한 기록을 오염시킨다** — 2026-08-06 실측 중 사진·미디어 보관함·데스크탑·
+        //    이동식 볼륨 4건이 앱 이름으로 등록되고 사용자에게 권한 창이 떴다(제작자 방해).
+        // ③ 그래서 접근 대상은 **프롬프트가 뜨지 않는 FDA 계열(Safari·Mail·휴지통)만**으로 고정한다.
+        //    시스템/SIP 경로·데스크탑·문서·사진·이동식 볼륨은 **절대 추가하지 말 것**(추가했다가 프롬프트를 띄운 실사례).
+        // 판별식이 이미 확정됐으므로 이 훅은 회귀 확인용으로만 쓴다.
+        if ProcessInfo.processInfo.environment["TF_FDA_PROBE"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                let home = FileManager.default.homeDirectoryForCurrentUser
+                var cases: [(String, URL)] = [
+                    ("TCC:Safari", home.appendingPathComponent("Library/Safari")),
+                    ("TCC:Mail", home.appendingPathComponent("Library/Mail")),
+                    ("TCC:Trash", home.appendingPathComponent(".Trash")),
+                ]
+                // POSIX 권한 거부 대조군 — 임시 폴더를 0000으로 만들어 비교(끝나면 원복)
+                let posix = FileManager.default.temporaryDirectory.appendingPathComponent("tf-fdaprobe-posix")
+                try? FileManager.default.createDirectory(at: posix, withIntermediateDirectories: true)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: posix.path)
+                cases.append(("POSIX:0000", posix))
+                var report: [String] = []
+                for (label, url) in cases {
+                    do {
+                        let n = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil).count
+                        report.append("\(label) = 성공(\(n)건) 경로=\(url.path)")
+                    } catch {
+                        let e = error as NSError
+                        let posixCode = (e.userInfo[NSUnderlyingErrorKey] as? NSError).map {
+                            "\($0.domain)/\($0.code)"
+                        } ?? "없음"
+                        report.append("\(label) = 실패 domain=\(e.domain) code=\(e.code) underlying=\(posixCode) 설명=\(e.localizedDescription)")
+                    }
+                }
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: posix.path)
+                try? FileManager.default.removeItem(at: posix)
+                for line in report { NSLog("FDA_PROBE %@", line) }
+                // `open`으로 띄우면 stdout이 없고 os_log 회수도 환경을 타므로 파일로도 남긴다(회수 경로 단일화)
+                try? (report.joined(separator: "\n") + "\n")
+                    .write(toFile: "/tmp/tf-fda-probe.txt", atomically: true, encoding: .utf8)
+            }
+        }
         // TF_LISTING_FAIL=delete|chmod → (TF_START_DIR 병용) 보고 있는 폴더가 사라지거나 권한을 잃었을 때
         // 갱신 실패가 표면화되는지 실측 (제작자 확정 2026-08-06: 목록 비우고 오류 배너 — 이전엔 스테일 목록이 그대로 남았다)
         if let failMode = ProcessInfo.processInfo.environment["TF_LISTING_FAIL"] {
@@ -454,8 +500,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-                NSLog("LISTING_FAIL after 항목=[%@] 배너=%@",
-                      wc.debugItemNames().joined(separator: ", "), wc.debugMessageText())
+                NSLog("LISTING_FAIL after 항목=[%@] 전체디스크접근버튼=%@ 배너=%@",
+                      wc.debugItemNames().joined(separator: ", "),
+                      wc.debugFDAButtonVisible() ? "노출" : "숨김", wc.debugMessageText())
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-listingfail.png")
                 if failMode != "delete" {   // 검증 픽스처 원복(권한 되돌리기) — 정리 못 하면 폴더가 잠긴 채 남는다
                     try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)

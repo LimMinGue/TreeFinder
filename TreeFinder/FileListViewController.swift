@@ -1337,6 +1337,20 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     /// nil을 주면 이전 오류를 해제한다. 조용한 실패 금지: 갱신 실패를 삼키면 **사라진 폴더의 목록이 그대로 남고**
     /// 그 위에서 만든 새 폴더·붙여넣기는 디스크에만 반영돼 사용자가 실패한 줄 알고 반복한다
     /// (제작자 확정 2026-08-06: 목록을 비우고 배너 표시 — Finder는 배너를 안 띄우지만 정직함을 택함).
+    /// 이 권한 오류가 **개인정보 보호(TCC)** 때문인가 — 즉 전체 디스크 접근을 켜면 풀리는 종류인가.
+    /// 실측(2026-08-06, 전체 디스크 접근이 없는 프로세스로 측정):
+    ///   ~/Library/Safari·~/Library/Mail·~/.Trash → NSCocoaError 257 / NSPOSIXErrorDomain **1(EPERM)**
+    ///   chmod 000 폴더                          → NSCocoaError 257 / NSPOSIXErrorDomain **13(EACCES)**
+    /// 상위 코드(257)는 같으므로 반드시 underlying POSIX 코드로 갈라야 한다.
+    /// underlying이 없으면(포맷이 바뀌면) **TCC 쪽으로 보수적 판정** — 종전 동작과 같아 회귀가 없다.
+    static func deniedByPrivacyPermission(_ error: Error) -> Bool {
+        let ns = error as NSError
+        guard ns.domain == NSCocoaErrorDomain, ns.code == NSFileReadNoPermissionError else { return false }
+        guard let posix = ns.userInfo[NSUnderlyingErrorKey] as? NSError,
+              posix.domain == NSPOSIXErrorDomain else { return true }
+        return posix.code != Int(EACCES)
+    }
+
     private func showListingFailure(_ error: Error?) {
         guard let error else {
             messageLabel.stringValue = ""
@@ -1345,15 +1359,19 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             return
         }
         var text = String(format: L("Can't read this folder — %@"), error.localizedDescription)
-        // 휴지통 등 보호 폴더 = 전체 디스크 접근 필요 — 사유만 말고 해결법 안내 (제작자 제보 2026-07-17)
-        let permissionDenied = (error as NSError).domain == NSCocoaErrorDomain
-            && (error as NSError).code == NSFileReadNoPermissionError
-        if permissionDenied {
+        // 휴지통 등 보호 폴더 = 전체 디스크 접근 필요 — 사유만 말고 해결법 안내 (제작자 제보 2026-07-17).
+        // **단, TCC가 원인일 때만**: 폴더 자체의 POSIX 권한 때문이면 전체 디스크 접근을 켜도 안 열리므로
+        // 안내가 오히려 헛걸음이 된다(제작자 지시 2026-08-06). 두 원인은 상위 오류가 257로 같고
+        // **underlying POSIX 코드로만 갈린다**(실측): TCC=EPERM(1) · 폴더 권한=EACCES(13).
+        // 판정이 틀리는 쪽으로 기울어도 안전하다 — EPERM 오판 시 결과는 종전과 동일한 안내다.
+        if Self.deniedByPrivacyPermission(error) {
             text += "\n\n" + L("Allow TreeFinder under System Settings ▸ Privacy & Security ▸ Full Disk Access, then relaunch the app.")
+            fdaButton.isHidden = false
+        } else {
+            fdaButton.isHidden = true   // 폴더 권한 문제 = 해결 수단이 앱 밖에 있음(Finder도 사유만 표시)
         }
         messageLabel.stringValue = text
         messageLabel.isHidden = false
-        fdaButton.isHidden = !permissionDenied
     }
 
     /// 시스템 설정 ▸ 개인정보 보호 및 보안 ▸ 전체 디스크 접근 바로 열기
@@ -2636,6 +2654,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     /// TF_LISTING_FAIL — 오류 배너 문구(숨김이면 빈 문자열)
     func debugMessageText() -> String { messageLabel.isHidden ? "" : messageLabel.stringValue }
+
+    /// TF_LISTING_FAIL — 전체 디스크 접근 버튼 노출 여부(폴더 권한 문제에선 숨어 있어야 한다, §33)
+    func debugFDAButtonVisible() -> Bool { !fdaButton.isHidden }
     #endif
 
     /// 명시 선택된 이동/복사 실행 — 이동은 크로스 볼륨도 이동(FileManager.moveItem = 복사+원본 제거,
