@@ -749,9 +749,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         let url = selectedBrowserURL()
         onSelect?(url.map { browserItem($0) })   // 미리보기·경로 바·상태바 갱신
         notifyStatus()
-        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
-            QLPreviewPanel.shared().reloadData()   // 컬럼 뷰에서도 QL이 선택 따라감
-        }
+        syncQuickLookIfVisible()   // 컬럼 뷰에서도 QL이 선택 따라감
     }
 
     @objc private func browserDoubleClicked(_ sender: NSBrowser) {
@@ -802,7 +800,10 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         let panel = QLPreviewPanel.shared()
         let visible = QLPreviewPanel.sharedPreviewPanelExists() && (panel?.isVisible ?? false)
         let item = (panel?.currentPreviewItem as? NSURL)?.lastPathComponent ?? "nil"
-        return "visible=\(visible) item=\(item)"
+        // owner = 지금 이 컨트롤러가 패널을 쥐고 있는지. 창 활성화 중엔 잠시 nil이 되므로
+        // item=nil 이 "갱신 실패"인지 "제어권 이양 중"인지 가르는 판별값이다.
+        let owner = (panel?.dataSource as AnyObject?) === self ? "yes" : "no"
+        return "visible=\(visible) item=\(item) owner=\(owner)"
     }
     /// 열린 패널에 Space를 handle로 전달 = 닫기 경로. return true(소비)면 목록으로 안 되튕겨 이중 토글 없음.
     func debugQuickLookCloseViaSpace() -> Bool {
@@ -812,6 +813,49 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 characters: " ", charactersIgnoringModifiers: " ", isARepeat: false, keyCode: 49)
         else { return false }
         return previewPanel(panel, handle: space)   // true = Space 소비(되튕김 차단)
+    }
+    /// TF_QUICKLOOK_FOLLOW — 열린 팝업에 아래 화살표를 handle로 전달 = 실제 사용자 키 경로
+    /// (패널 handle: → 활성 뷰 keyDown → AppKit 내장 네비 → tableViewSelectionDidChange).
+    /// 선택 이동에 debugQuickLook·debugSelectFirstItem 같은 selectionDidSync 호출 헬퍼를 쓰면
+    /// 그게 버그의 우회로라 수정 전에도 통과하는 위양성이 난다 — 반드시 이 경로로만 옮긴다(Tester 위원).
+    func debugQuickLookArrowDown() -> Bool {
+        guard let panel = QLPreviewPanel.shared(),
+              let down = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                modifierFlags: [.function, .numericPad],
+                timestamp: 0, windowNumber: view.window?.windowNumber ?? 0, context: nil,
+                characters: "\u{F701}", charactersIgnoringModifiers: "\u{F701}",
+                isARepeat: false, keyCode: 125)
+        else { return false }
+        return previewPanel(panel, handle: down)
+    }
+    /// 목록이 실제로 선택한 파일 이름 — 패널이 보는 item= 과 함께 찍어야
+    /// "화살표 미배달"과 "배달됐지만 QL이 안 따라감"을 구분할 수 있다(동시성 위원).
+    func debugSelectedName() -> String {
+        guard let first = activeSelectionIndexes().first, items.indices.contains(first) else { return "nil" }
+        return items[first].name
+    }
+    /// TF_QUICKLOOK_FOLLOW — 합성 클릭이 헤드리스에서 창 활성화 클릭에 먹히며 패널 소유권을 잃는 것이 실측됐다
+    /// (수정 전후 동일 = 이 수정과 무관한 아티팩트). 실사용에서 창 활성화 시 시스템이 하는 제어권 재평가를
+    /// 공개 API로 명시 요청해 owner=yes를 복구한다. **선택 변경과 반드시 분리해서 호출할 것** —
+    /// updateController 자체가 패널을 다시 읽게 만들어, 붙여 쓰면 수정 없이도 통과하는 위양성이 난다(실측).
+    func debugRestoreQuickLookOwnership() {
+        NSApp.activate(ignoringOtherApps: true)
+        view.window?.makeKeyAndOrderFront(nil)
+        view.window?.makeFirstResponder(tableView)
+        QLPreviewPanel.shared()?.updateController()
+    }
+    /// 마우스와 같은 델리게이트(tableViewSelectionDidChange)로 수렴하는 선택 변경.
+    /// selectionDidSync는 절대 부르지 않는다 — 그게 버그의 우회로라 수정 전에도 통과한다(Tester 위원).
+    func debugSelectRowViaDelegate(_ row: Int) {
+        guard viewStyle == .list, items.indices.contains(row) else { return }
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    }
+    /// TF_QUICKLOOK_FOLLOW — 합성 클릭용 행 중심 좌표(창 기준). 클릭 발사는 TF_DUAL_PANE=3과 동일 경로 공용(규칙 4).
+    func debugListRowPoint(_ row: Int) -> NSPoint? {
+        guard viewStyle == .list, items.indices.contains(row) else { return nil }
+        let rect = tableView.rect(ofRow: row)
+        tableView.scrollRowToVisible(row)
+        return tableView.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
     }
     /// TF_COLUMN_MENU — 헤더 우클릭 메뉴 구조(캡처 배치·토글/회색/체크) + 컬럼 토글 렌더 검증
     func debugColumnHeaderMenu() -> [String] {
@@ -885,6 +929,23 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         selectedURLs().filter { $0.isFileURL }   // 네트워크 센티널 등 비파일 제외
     }
 
+    /// 팝업이 떠 있으면 새 선택으로 다시 그린다 — 리스트·아이콘·갤러리·컬럼 공용 창구 (제작자 제보 2026-08-07).
+    /// 뷰마다 선택 진입점이 달라(테이블은 AppKit 델리게이트) 갱신이 리스트에서만 누락돼 있었다 — 새 뷰 추가 시 재발 차단(규칙 4).
+    /// 함정 3건(실측): ① `shared()`는 없으면 만든다 → 반드시 `sharedPreviewPanelExists()`를 먼저 봐야 팝업 미사용자에게 패널이 안 생긴다.
+    /// ② `currentPreviewItemIndex`는 절대 대입하지 않는다 — 음수는 reloadData로도 회복 불가(빈 팝업 고착),
+    ///    NSNotFound는 메인 스레드가 사실상 영구 정지. 범위를 벗어난 인덱스는 reloadData가 알아서 0으로 보정한다.
+    /// 갱신은 `reloadData()`만 — `refreshCurrentPreviewItem()`은 "같은 파일의 내용이 바뀐 경우"용이라 다른 파일로 못 바꾼다(실측).
+    /// ③ 이 패널을 지금 우리가 쥐고 있을 때만 갱신한다 — 창 활성화 시 QL이 제어권을 재평가하며
+    ///    endPreviewPanelControl이 dataSource를 잠시 nil로 만드는데, 그 틈에 reloadData가 들어가면
+    ///    팝업이 빈 화면이 된다(실측: 마우스 클릭 후 item=nil). 듀얼 페인에서 비활성 페인의 선택 변화가
+    ///    활성 페인 소유의 팝업을 건드리는 것도 이 가드 하나로 함께 막힌다.
+    private func syncQuickLookIfVisible() {
+        guard QLPreviewPanel.sharedPreviewPanelExists(),
+              let panel = QLPreviewPanel.shared(), panel.isVisible,
+              panel.dataSource as AnyObject? === self else { return }
+        panel.reloadData()
+    }
+
     private var activeListResponder: NSView {
         switch viewStyle {
         case .list: return tableView
@@ -926,7 +987,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             panel.orderOut(nil)
             return true
         }
-        if [123, 124, 125, 126].contains(code) {   // 화살표 = 목록 탐색(선택 이동 → reloadData가 QL 따라감)
+        if [123, 124, 125, 126].contains(code) {   // 화살표 = 목록 탐색(선택 이동 → syncQuickLookIfVisible이 QL 따라감)
             activeListResponder.keyDown(with: event)
             return true
         }
@@ -1057,10 +1118,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         onSelect?(anchor.flatMap { items.indices.contains($0) ? items[$0] : nil })
         notifyStatus()
         if viewStyle == .gallery { updateGalleryPreview() }
-        // Quick Look 팝업이 열려 있으면 선택 이동을 따라감 (Finder 규약, 제작자 지시 2026-07-25)
-        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
-            QLPreviewPanel.shared().reloadData()
-        }
+        syncQuickLookIfVisible()   // 아이콘·갤러리의 선택 이동을 팝업이 따라감 (Finder 규약, 제작자 지시 2026-07-25)
     }
 
     private func updateGalleryPreview() {
@@ -2858,6 +2916,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         let row = tableView.selectedRow
         onSelect?(row >= 0 && items.indices.contains(row) ? items[row] : nil)
         notifyStatus()
+        // 리스트의 사용자 선택은 selectionDidSync가 아니라 이 AppKit 델리게이트로 들어온다 —
+        // 여기 갱신이 빠져 있어 팝업이 처음 파일에 고정됐다 (제작자 제보 2026-08-07)
+        syncQuickLookIfVisible()
     }
 
     /// 리스트 type-select = 내장 경로 폐기, IME(NSTextInputClient) 경로로 통일 (제작자 지시 2026-07-25, 조사 반영).

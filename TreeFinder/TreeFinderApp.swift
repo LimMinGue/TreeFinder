@@ -712,6 +712,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 NSLog("QUICKLOOK afterClose %@", wc.debugQuickLookState())   // visible=false면 깜빡임 없이 닫힘
             }
         }
+        // TF_QUICKLOOK_FOLLOW=1 → (TF_START_DIR 병용, 이름 다른 파일 2개 이상 필요) 팝업이 선택 이동을 따라가는지 실측 (제작자 제보 2026-08-07)
+        // 기존 TF_QUICKLOOK(열기·Space 닫기)은 이 버그를 재현하지 못해 회귀 기준선으로 보존하고 별도 스위치로 분리.
+        // 한 줄에 selected=(목록의 실제 선택)과 item=(패널이 보는 파일)을 같이 찍는다 — 하나만 찍으면
+        // "키 미배달"과 "배달됐지만 QL이 안 따라감"을 구분할 수 없다.
+        if ProcessInfo.processInfo.environment["TF_QUICKLOOK_FOLLOW"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { wc.debugQuickLook() }   // 첫 항목 선택 + 팝업 열기
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                NSLog("QLFOLLOW open %@ selected=%@", wc.debugQuickLookState(), wc.debugSelectedName())
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.3) {
+                // 선택 이동은 반드시 실제 키 경로로 — selectionDidSync를 부르는 헬퍼를 쓰면 수정 전에도 통과한다(위양성)
+                NSLog("QLFOLLOW arrowConsumed=%@", wc.debugQuickLookArrowDown() ? "true" : "false")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.1) {
+                NSLog("QLFOLLOW afterArrow %@ selected=%@", wc.debugQuickLookState(), wc.debugSelectedName())
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-qlfollow.png")
+            }
+            // 마우스 경로 — 첫 클릭은 비활성 창의 활성화 클릭에 먹히는 것이 실측돼(선택 불변) 다른 행으로 한 번 더 보낸다.
+            // 그래도 selected= 가 안 바뀌면 무효 판정(헬퍼 주석 규칙) — 화살표 결과만 채택한다.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) { wc.debugClickListRow(2) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.4) { wc.debugClickListRow(3) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.2) {
+                NSLog("QLFOLLOW afterClick %@ selected=%@", wc.debugQuickLookState(), wc.debugSelectedName())
+            }
+            // 마우스와 같은 델리게이트로 수렴하는 경로를 활성 상태(owner=yes)에서 검증 — 합성 클릭 무효 시의 본 판정.
+            // 소유권 복구와 선택 변경은 반드시 분리(붙이면 updateController가 스스로 갱신해 위양성).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.6) { wc.debugRestoreQuickLookOwnership() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6.4) {
+                NSLog("QLFOLLOW restored %@ selected=%@", wc.debugQuickLookState(), wc.debugSelectedName())
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6.8) { wc.debugSelectRowViaDelegate(2) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 7.6) {
+                NSLog("QLFOLLOW afterSelect %@ selected=%@", wc.debugQuickLookState(), wc.debugSelectedName())
+            }
+        }
         // TF_COLUMN_MENU=1 → (TF_START_DIR 병용) 헤더 우클릭 메뉴 구조 로그 + 최근사용일·태그 컬럼 표시 후 렌더 (제작자 지시 2026-07-25)
         if ProcessInfo.processInfo.environment["TF_COLUMN_MENU"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {

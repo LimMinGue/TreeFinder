@@ -481,6 +481,24 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
     func debugQuickLook() { listController?.debugQuickLook() }   // TF_QUICKLOOK
     func debugQuickLookState() -> String { listController?.debugQuickLookState() ?? "nil" }
     func debugQuickLookCloseViaSpace() -> Bool { listController?.debugQuickLookCloseViaSpace() ?? false }
+    func debugQuickLookArrowDown() -> Bool { listController?.debugQuickLookArrowDown() ?? false }   // TF_QUICKLOOK_FOLLOW
+    func debugSelectedName() -> String { listController?.debugSelectedName() ?? "nil" }
+    /// TF_QUICKLOOK_FOLLOW — 마우스 경로 검증. 합성 클릭이 비활성 창의 활성화 클릭에 먹혀 선택이 안 바뀌는 경우가
+    /// 실측됐으므로, 클릭 후 selected= 가 그대로면 **테스트 무효**로 처리하고 화살표 결과만 채택한다(수정 실패로 오독 금지).
+    func debugRestoreQuickLookOwnership() { listController?.debugRestoreQuickLookOwnership() }   // TF_QUICKLOOK_FOLLOW
+    func debugSelectRowViaDelegate(_ row: Int) { listController?.debugSelectRowViaDelegate(row) }
+    func debugClickListRow(_ row: Int) {
+        guard let window, let point = listController?.debugListRowPoint(row) else { return }
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            if let event = NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 1, pressure: 1) {
+                NSApp.postEvent(event, atStart: false)   // down+up을 큐로 — 테이블 추적 루프 행 방지(TF_DUAL_PANE=3과 동일)
+            }
+        }
+    }
     func debugColumnHeaderMenu() -> [String] { listController?.debugColumnHeaderMenu() ?? [] }   // TF_COLUMN_MENU
     func debugShowColumn(_ key: String) { listController?.debugShowColumn(key) }
     func debugBrowserSelectFolder() { listController?.debugBrowserSelectFolder() }   // TF_COLUMNS
