@@ -165,22 +165,36 @@ final class NetworkLocationStore {
         return out
     }
 
-    /// 마운트 상태 대조 + 새 네트워크 마운트 자동 기억 (원본: "마운트한 모든 공유를 기억")
+    /// 마운트 상태 대조 + 새 네트워크 마운트 자동 기억 (원본: "마운트한 모든 공유를 기억").
+    /// 볼륨 열거·stat는 오프메인 — 종전엔 메인에서 직접 해 죽은 SMB 마운트에서 앱이 통째로 얼 수 있었다
+    /// (VolumeMonitor는 같은 이유로 이미 오프메인이었는데 여기만 남아 §3 규약 불일치, 2026-09-05 A5).
     func refresh() {
+        Task.detached(priority: .utility) {
+            let mounted = Self.mountedShares()
+            await MainActor.run { NetworkLocationStore.shared.apply(mounted) }
+        }
+    }
+
+    /// 마운트된 네트워크 공유 스냅숏 — 오프메인 전용(볼륨 키 조회는 마운트 루트 stat이라 행업 마운트에서 블록될 수 있다)
+    nonisolated private static func mountedShares() -> [(remote: URL, name: String, mountPoint: URL)] {
         let keys: [URLResourceKey] = [.volumeIsLocalKey, .volumeNameKey, .volumeURLForRemountingKey]
         let volumes = FileManager.default.mountedVolumeURLs(
             includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
-        var mountedByKey: [String: URL] = [:]   // dedupeKey → mount point
-        for volume in volumes {
+        return volumes.compactMap { volume in
             guard let values = try? volume.resourceValues(forKeys: Set(keys)),
                   values.volumeIsLocal == false,
-                  let remote = values.volumeURLForRemounting else { continue }   // 재마운트 URL 없으면 기억 불가
-            let probe = NetworkLocationItem(remoteURL: remote, name: "")
-            mountedByKey[probe.dedupeKey] = volume
+                  let remote = values.volumeURLForRemounting else { return nil }   // 재마운트 URL 없으면 기억 불가
+            return (remote, values.volumeName ?? remote.lastPathComponent, volume)
+        }
+    }
+
+    private func apply(_ mounted: [(remote: URL, name: String, mountPoint: URL)]) {
+        var mountedByKey: [String: URL] = [:]   // dedupeKey → mount point
+        for share in mounted {
+            let probe = NetworkLocationItem(remoteURL: share.remote, name: "")
+            mountedByKey[probe.dedupeKey] = share.mountPoint
             if !items.contains(where: { $0.dedupeKey == probe.dedupeKey }) {   // 표기 달라도 같은 공유면 중복 기억 금지
-                items.append(NetworkLocationItem(remoteURL: remote,
-                                                 name: values.volumeName ?? remote.lastPathComponent,
-                                                 mountPoint: volume))
+                items.append(NetworkLocationItem(remoteURL: share.remote, name: share.name, mountPoint: share.mountPoint))
             }
         }
         for item in items { item.mountPoint = mountedByKey[item.dedupeKey] }

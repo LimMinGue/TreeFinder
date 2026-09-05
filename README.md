@@ -4,7 +4,7 @@
 
 ![platform](https://img.shields.io/badge/platform-macOS%2014%2B-blue)
 ![swift](https://img.shields.io/badge/Swift-AppKit%20(programmatic)-orange)
-![license](https://img.shields.io/badge/license-MIT-green)
+![license](https://img.shields.io/badge/license-Proprietary-lightgrey)
 
 TreeFinder는 "폴더 트리를 항상 옆에 두고 쓰는" Windows 탐색기식 탐색 경험을 macOS에서 네이티브로 재현한 파일 매니저입니다. Finder가 잘하는 것(QuickLook·태그·네트워크 연결)과 탐색기가 잘하던 것(트리 탐색·전 컬럼 정렬·폴더 크기 표시)을 한 창에 담았습니다.
 
@@ -84,7 +84,7 @@ TreeFinder는 "폴더 트리를 항상 옆에 두고 쓰는" Windows 탐색기�
 
 ## 🧰 요구사항
 
-- **macOS 14.0 (Sonoma) 이상**, Apple Silicon / Intel (Universal)
+- **macOS 14.0 (Sonoma) 이상**, **Apple Silicon(arm64) 전용** — Intel Mac은 지원하지 않습니다(동반 HWP 렌더러 rhwp도 arm64 빌드)
 - 빌드 시: **Xcode 15+** (SwiftTerm 패키지 해석과 Metal 툴체인이 필요해 Command Line Tools만으로는 부족합니다)
 
 ---
@@ -152,9 +152,11 @@ open /Applications/TreeFinder.app
 
 | 구성 요소 | 용도 | 라이선스 |
 |---|---|---|
-| [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) | 내장 터미널 | MIT |
-| [rhwp](https://github.com/edwardkim/rhwp) | HWP/HWPX 페이지 렌더(동반 CLI) | MIT |
-| [Toast UI Editor](https://ui.toast.com/tui-editor) | 마크다운 WYSIWYG 편집 | MIT |
+| [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) 1.15.0 | 내장 터미널 | MIT (Miguel de Icaza · xterm.js authors · SourceLair · Christopher Jeffrey) |
+| [rhwp](https://github.com/edwardkim/rhwp) 0.7.18 | HWP/HWPX 페이지 렌더(동반 CLI) | MIT — 정적 링크된 Rust 크레이트 195개(전부 허용적 라이선스)는 고지 파일에 표로 수록 |
+| [Toast UI Editor](https://ui.toast.com/tui-editor) 3.2.2 | 마크다운 WYSIWYG 편집 | MIT — 번들 내 ProseMirror(MIT)·DOMPurify(Apache-2.0) 포함 |
+
+전체 고지문(라이선스 원문 전재)은 [TreeFinder/Vendor/THIRD-PARTY-NOTICES.txt](TreeFinder/Vendor/THIRD-PARTY-NOTICES.txt)에 있으며, 앱 안에서는 **도움말 ▸ 오픈 소스 라이선스**로 볼 수 있습니다.
 
 ---
 
@@ -166,6 +168,9 @@ open /Applications/TreeFinder.app
 
 ## 📄 라이선스
 
-[MIT](LICENSE) © 2026 LimMinGue
+**독점 라이선스**(Proprietary) — © 2026 LimMinGue. All rights reserved. 자세한 조건은 [LICENSE](LICENSE)를 참고하세요.
+
+- **v0.4.6 이하**(2026-08-07 이전 공개분)는 해당 버전에 한해 계속 [MIT 라이선스](https://github.com/LimMinGue/TreeFinder/blob/v0.4.6/LICENSE)가 적용됩니다.
+- 동반 오픈 소스 구성 요소는 각자의 라이선스를 따릅니다([서드파티](#-서드파티) 참조).
 
 버그 리포트 및 문의: iamwhatiam78@gmail.com

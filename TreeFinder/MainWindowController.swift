@@ -139,10 +139,16 @@ final class MainContentViewController: NSViewController {
     }
 }
 
-final class MainWindowController: NSWindowController, NSMenuItemValidation {
+final class MainWindowController: NSWindowController, NSMenuItemValidation, NSToolbarItemValidation {
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
+        // 파일 조작 메뉴 — 네트워크 브라우즈(가상 목록)·휴지통 안에선 비활성/동사 교체 (2026-09-05 A10·A19)
+        case #selector(newFolder(_:)), #selector(newTextDocument(_:)), #selector(renameSelected(_:)):
+            return listController?.canModifyHere ?? false
+        case #selector(deleteSelected(_:)):
+            menuItem.title = (listController?.isInTrash ?? false) ? L("Delete Immediately…") : L("Move to Trash")
+            return listController?.fileOpsAllowed ?? false
         case #selector(toggleShowHidden(_:)):
             menuItem.state = UserDefaults.standard.bool(forKey: SettingsKeys.showHidden) ? .on : .off
         case #selector(togglePreview(_:)):
@@ -160,6 +166,15 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         default: break
         }
         return true
+    }
+
+    /// 도구모음 새 폴더·휴지통 버튼 — 메뉴와 같은 가드(네트워크 브라우즈·휴지통 위생)
+    func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
+        switch item.action {
+        case #selector(newFolder(_:)): return listController?.canModifyHere ?? false
+        case #selector(deleteSelected(_:)): return listController?.fileOpsAllowed ?? false
+        default: return true
+        }
     }
 
     private static let byteFormatter = ByteCountFormatter()
@@ -507,6 +522,35 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
     func debugSelectNotifyCount() -> Int { listController?.debugSelectNotifyCount ?? -1 }   // TF_FLICKER_TEST
 
     func debugFullReloadCount() -> Int { listController?.debugFullReloadCount ?? -1 }   // TF_FLICKER_TEST
+
+    // 전체 검토(2026-09-05) 회귀 훅
+    func debugBrowserSelectFile() { listController?.debugBrowserSelectFile() }   // TF_COLUMNS — 파일 더블클릭 (A1)
+    func debugItemMenuTitles() -> [String] { listController?.debugItemMenuTitles() ?? [] }   // TF_TRASH_MENU (A19)
+    func debugBackgroundMenuTitles() -> [String] { listController?.debugBackgroundMenuTitles() ?? [] }
+    func debugSelectAll() { listController?.debugSelectAll() }   // TF_COMPRESS (A3)
+    func debugCompress() { listController?.debugCompress() }
+    func debugShowCount() -> Int { listController?.debugShowCount ?? -1 }   // TF_TREE_CLICK (A16)
+    /// TF_TREE_CLICK — 트리 홈 행에 합성 클릭을 보낸다(down → 0.15s 뒤 up: 아웃라인 뷰의 추적 루프가 up을 받게).
+    /// 첫 클릭이 창 활성화에 먹히는 실측이 있어 호출자가 2회 보낸다.
+    func debugClickTreeHome() {
+        guard let window, let point = treeController?.debugHomeRowPoint() else { NSLog("TREE_CLICK point=nil"); return }
+        NSLog("TREE_CLICK point=%@", NSStringFromPoint(point))
+        func post(_ type: NSEvent.EventType) {
+            if let event = NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 1, pressure: 1) {
+                NSApp.postEvent(event, atStart: false)
+            }
+        }
+        post(.leftMouseDown)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { post(.leftMouseUp) }
+    }
+    func debugUndo() { listController?.undo(nil) }   // TF_UNDO_MOVE (A13)
+    func debugMarkdownDiscardTest(other: URL) {   // TF_MD_DISCARD (A2)
+        previewController?.debugMarkdownDiscardTest(other: other)
+    }
     #endif
 
     /// File ▸ New Tab(⌘T) — 커스텀 탭 스트립(파일 목록 영역 스코프)에 새 탭 (decisions §10)
@@ -631,9 +675,12 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation {
         let controller = MainWindowController(directory: directory)
         openWindows.append(controller)
         if let newWindow = controller.window {
-            NotificationCenter.default.addObserver(
+            final class ObserverBox { var token: NSObjectProtocol? }   // 클로저 안에서 자기 토큰을 해제하기 위한 상자
+            let box = ObserverBox()
+            box.token = NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification, object: newWindow, queue: .main) { note in
                 MainWindowController.openWindows.removeAll { $0.window === (note.object as? NSWindow) }
+                if let token = box.token { NotificationCenter.default.removeObserver(token); box.token = nil }   // 창당 1회 (A12)
             }
         }
         controller.showWindow(nil)
@@ -749,8 +796,8 @@ extension MainWindowController: NSToolbarDelegate {
                  itemForItemIdentifier id: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch id {
-        case .back: return button(id, "chevron.left", L("Back"), Selector(("goBack:")))
-        case .forward: return button(id, "chevron.right", L("Forward"), Selector(("goForward:")))
+        case .back: return button(id, "chevron.left", L("Back"), #selector(goBack(_:)))
+        case .forward: return button(id, "chevron.right", L("Forward"), #selector(goForward(_:)))
         case .windowTitle:
             // 폴더명 타이틀 — 경로 표시는 하단 경로 바가 담당(중복 제거, 제작자 지적 2026-07-16)
             let item = NSToolbarItem(itemIdentifier: id)
@@ -760,8 +807,8 @@ extension MainWindowController: NSToolbarDelegate {
             item.view = label
             titleLabel = label
             return item
-        case .newFolder: return button(id, "folder.badge.plus", L("New Folder"), Selector(("newFolder:")))
-        case .deleteFile: return button(id, "trash", L("Move to Trash"), Selector(("deleteSelected:")))
+        case .newFolder: return button(id, "folder.badge.plus", L("New Folder"), #selector(newFolder(_:)))
+        case .deleteFile: return button(id, "trash", L("Move to Trash"), #selector(deleteSelected(_:)))
         case .togglePreview: return button(id, "sidebar.right", L("Show/Hide Preview"), #selector(togglePreview(_:)))
         case .sortMenu:
             let item = NSMenuToolbarItem(itemIdentifier: id)

@@ -150,15 +150,15 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     private let networkGroup = NetworkGroupMarker()
     private var trashNode = FolderTreeViewController.makeTrashNode()
 
-    private static func buildLocalLocations() -> [FolderNode] {
-        var nodes = [FolderNode(url: FileManager.default.homeDirectoryForCurrentUser)]
-        let keys: [URLResourceKey] = [.volumeNameKey, .volumeIsLocalKey]
-        let volumes = FileManager.default.mountedVolumeURLs(
-            includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
-        nodes += volumes
-            .filter { (try? $0.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal ?? false }
-            .map { FolderNode(url: $0, symbolName: "internaldrive") }
-        return nodes
+    /// Locations 루트 = 홈 + 로컬 볼륨. 볼륨 목록은 VolumeMonitor 스냅숏(오프메인 계산·메모리 조회) —
+    /// 종전엔 여기서 mountedVolumeURLs + 볼륨 stat을 메인에서 직접 해 죽은 네트워크 마운트에 앱이 얼 수 있었다(§3, 2026-09-05 A5).
+    /// 기존 노드는 URL이 같으면 재사용 — 마운트/언마운트마다 홈 트리 확장 상태가 붕괴하지 않게(재사용 없는 호출 = 설정 변경 재구성).
+    private static func buildLocalLocations(reusing existing: [FolderNode] = []) -> [FolderNode] {
+        let byURL = Dictionary(existing.map { ($0.url, $0) }, uniquingKeysWith: { a, _ in a })
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return ([home] + VolumeMonitor.shared.localVolumes).map { url in
+            byURL[url] ?? FolderNode(url: url, symbolName: url == home ? nil : "internaldrive")
+        }
     }
 
     /// 휴지통 = 잎 노드 — 클릭 시 목록으로 탐색(FDA 없으면 목록의 기존 오류 표면화가 담당)
@@ -220,6 +220,8 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
 
         let menu = NSMenu()
         menu.delegate = self
+        // buildMenu가 isEnabled를 직접 관리 — 자동 활성화가 "즐겨찾기에 추가" 비활성을 표시 시점에 되돌리던 것 차단(A11)
+        menu.autoenablesItems = false
         outlineView.menu = menu
 
         outlineView.registerForDraggedTypes([.fileURL])   // 트리 폴더로 드롭 (제작자 지적 2026-07-16)
@@ -253,20 +255,19 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         outlineView.expandItem(favoritesGroup)
         outlineView.expandItem(locationsGroup)
         outlineView.expandItem(localLocations.first)   // 홈만 기본 확장 — 루트/볼륨은 접힌 채
-        // 볼륨 마운트/언마운트·네트워크 위치 변화 → Locations 재구성 (USB 미반영 기존 버그도 해결)
+        // 네트워크 위치(기억 공유) 변화 → 네트워크 그룹만 갱신. 로컬 볼륨 변화는 아래 VolumeMonitor.changed가 담당(A5)
         NotificationCenter.default.addObserver(forName: .networkLocationsChanged, object: nil, queue: .main) {
             [weak self] _ in
             guard let self else { return }
-            self.localLocations = Self.buildLocalLocations()
-            self.outlineView.reloadItem(self.locationsGroup, reloadChildren: true)
-            self.outlineView.expandItem(self.locationsGroup)
+            self.outlineView.reloadItem(self.networkGroup, reloadChildren: true)
         }
-        // 착탈식 볼륨 스냅숏 준비/변화 → 볼륨 행 재렌더(⏏ 버튼 표시) (제작자 지시 2026-07-25)
+        // 볼륨 스냅숏 준비/변화(마운트·언마운트·추출) → Locations 재구성(노드 재사용 = 홈 확장 보존) + ⏏ 버튼 재렌더
         NotificationCenter.default.addObserver(forName: VolumeMonitor.changed, object: nil, queue: .main) {
             [weak self] _ in
             guard let self else { return }
-            // 볼륨 노드 행만 재렌더(확장 보존) — 새 볼륨 마운트/언마운트는 위 networkLocationsChanged가 재구성
-            for node in self.localLocations { self.outlineView.reloadItem(node) }
+            self.localLocations = Self.buildLocalLocations(reusing: self.localLocations)
+            self.outlineView.reloadItem(self.locationsGroup, reloadChildren: true)
+            self.outlineView.expandItem(self.locationsGroup)
         }
         _ = VolumeMonitor.shared   // 스냅숏 부트스트랩(첫 refresh 트리거 — 옵저버 등록 후)
         // 다른 앱·터미널에서 폴더 이름을 바꾸고 TreeFinder로 돌아오는 순간 트리 최신화 (제작자 제보 2026-07-25).
@@ -390,7 +391,9 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
 
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { !(item is SidebarGroup) }
 
-    func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellFor item: Any) -> Bool {
+    // 정식 셀렉터는 shouldShowOutlineCellForItem: — 종전 이름(…CellFor:)은 프로토콜과 안 맞아 한 번도 호출되지 않는 죽은 코드였다
+    // (컴파일러 "nearly matches" 경고 2건, 전체 검토 2026-09-05 A6)
+    func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool {
         !(item is SidebarGroup)
     }
 
@@ -491,9 +494,11 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
             ?? (item as? NetworkLocationItem)?.mountPoint
     }
 
-    // 키보드 화살표 이동용 — 마우스 재클릭은 rowClicked가 담당
+    // 키보드 화살표 이동용 — 마우스 클릭(선택 변경 포함)은 rowClicked(action)가 담당.
+    // 종전엔 클릭 한 번에 둘 다 발화해 show()가 2회 돌았다(리스팅 취소·FSEvents 재시작 중복, 2026-09-05 A16).
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard !isRevealing else { return }
+        if let type = NSApp.currentEvent?.type, [.leftMouseDown, .leftMouseUp, .leftMouseDragged].contains(type) { return }
         let item = outlineView.item(atRow: outlineView.selectedRow)
         if item is NetworkGroupMarker {
             onSelectNetwork?()
@@ -613,6 +618,20 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     /// TF_TREE_NETWORK — 네트워크 그룹 확장(Bonjour 시작) 후 자식 구성을 로그로 확인
     func debugExpandNetwork() { outlineView.expandItem(networkGroup) }
 
+    /// TF_TREE_CLICK — 홈 행 중심 좌표(창 기준) — 합성 클릭으로 A16(이중 발화) 회귀 검증
+    func debugHomeRowPoint() -> NSPoint? {
+        guard let home = localLocations.first else { return nil }
+        let row = outlineView.row(forItem: home)
+        guard row >= 0 else { return nil }
+        outlineView.scrollRowToVisible(row)   // 시작 폴더 reveal이 사이드바를 아래로 스크롤해 홈 행이 창 밖에 있던 실측(hit=nil)
+        outlineView.window?.contentView?.layoutSubtreeIfNeeded()
+        let rect = outlineView.rect(ofRow: row)
+        let point = outlineView.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+        let hit = view.window?.contentView?.hitTest(point).map { String(describing: type(of: $0)) } ?? "nil"
+        NSLog("TREE_CLICK row=%d point=%@ hit=%@", row, NSStringFromPoint(point), hit)
+        return point
+    }
+
     /// TF_TREE_SYNC — 트리 선택을 네트워크 그룹 행으로 강제(호스트 클릭·연결 실패 상황 재현)
     func debugSelectNetworkRow() {
         let row = outlineView.row(forItem: networkGroup)
@@ -653,6 +672,9 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     #endif
 
     @objc private func rowClicked() {
+        #if DEBUG
+        NSLog("TREE_ROW_CLICKED row=%d selected=%d", outlineView.clickedRow, outlineView.selectedRow)
+        #endif
         guard outlineView.clickedRow >= 0 else { return }
         let item = outlineView.item(atRow: outlineView.clickedRow)
         if item is NetworkGroupMarker {

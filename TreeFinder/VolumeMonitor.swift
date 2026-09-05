@@ -14,6 +14,8 @@ final class VolumeMonitor {
     private(set) var ejectableRoots: Set<URL> = []
     /// 비로컬(네트워크) 볼륨 루트 — 동기 리스팅으로 내려가면 죽은 마운트에서 메인 스레드가 얼음(§3)
     private(set) var nonLocalRoots: Set<URL> = []
+    /// 로컬 볼륨 루트(마운트 순서) — 사이드바 Locations 구성용. 트리가 직접 볼륨을 stat하던 것을 이 스냅숏으로 대체(2026-09-05 A5)
+    private(set) var localVolumes: [URL] = []
 
     private init() {
         let center = NSWorkspace.shared.notificationCenter
@@ -50,6 +52,7 @@ final class VolumeMonitor {
             await MainActor.run {
                 VolumeMonitor.shared.ejectableRoots = snapshot.ejectable
                 VolumeMonitor.shared.nonLocalRoots = snapshot.nonLocal
+                VolumeMonitor.shared.localVolumes = snapshot.local
                 NotificationCenter.default.post(name: VolumeMonitor.changed, object: nil)
             }
         }
@@ -58,7 +61,7 @@ final class VolumeMonitor {
     /// 실측 판정식(2026-07-25 DMG 실측): `isVolume && (ejectable || removable || 비로컬)`.
     /// 부트'/'·Data(ejectable=false·local=true)는 자동 제외, USB/외장/디스크이미지/네트워크는 포함.
     /// nil 안전 스펠링(QC 지적): 모든 비교를 명시 `== true`/`== false`로 — try? 실패(v=nil)는 전부 비추출.
-    nonisolated private static func computeOffMain() -> (ejectable: Set<URL>, nonLocal: Set<URL>) {
+    nonisolated private static func computeOffMain() -> (ejectable: Set<URL>, nonLocal: Set<URL>, local: [URL]) {
         let keys: [URLResourceKey] = [.isVolumeKey, .volumeIsEjectableKey,
                                       .volumeIsRemovableKey, .volumeIsLocalKey]
         // .skipHiddenVolumes — 시스템 마운트(cryptex·CoreSimulator·autofs 등)를 배제해 트리(buildLocalLocations)와
@@ -67,14 +70,16 @@ final class VolumeMonitor {
             includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
         var roots: Set<URL> = []
         var remote: Set<URL> = []
+        var local: [URL] = []
         for u in volumes {
             guard let v = try? u.resourceValues(forKeys: Set(keys)), v.isVolume == true else { continue }
             if v.volumeIsEjectable == true || v.volumeIsRemovable == true || v.volumeIsLocal == false {
                 roots.insert(u.standardizedFileURL)
             }
             if v.volumeIsLocal == false { remote.insert(u.standardizedFileURL) }
+            if v.volumeIsLocal == true { local.append(u.standardizedFileURL) }
         }
-        return (roots, remote)
+        return (roots, remote, local)
     }
 }
 

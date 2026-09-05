@@ -12,7 +12,9 @@ actor SizeService {
     static let shared = SizeService()
 
     private var cache: [String: FolderSize] = [:]                  // 키 = NFC 정규화 경로 (§5 규약)
-    private var inflight: [String: Task<FolderSize, Never>] = [:]
+    // id는 "스캔 중 invalidate가 끼어들었는가"의 판별값 — 끼어들었으면 완료 결과를 캐시하지 않는다 (2026-09-05 A21)
+    private var inflight: [String: (id: Int, task: Task<FolderSize, Never>)] = [:]
+    private var nextScanID = 0
     private var running = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private let maxConcurrent = 2                                  // CPU/IO 포화 방지
@@ -37,7 +39,7 @@ actor SizeService {
     func size(for url: URL) async -> FolderSize {
         let key = Self.key(url)
         if let cached = cache[key] { return cached }
-        if let task = inflight[key] { return await task.value }
+        if let running = inflight[key] { return await running.task.value }
         // 제외 판정은 **경로 전체 해석** 기준 — 마지막 성분만 풀면 '조상 성분이 심링크'인 경로
         // (예: /tmp/링크/Caches, 링크가 ~/Library를 가리킴)로 TCC 제외 구역에 하강할 수 있다.
         // 여기는 오프메인 actor라 대상 stat이 UI를 막지 않는다(§3 제약 밖 — 실측 0.002ms).
@@ -51,23 +53,29 @@ actor SizeService {
             await self?.releaseSlot()
             return result
         }
-        inflight[key] = task
+        nextScanID += 1
+        let scanID = nextScanID
+        inflight[key] = (scanID, task)
         let result = await task.value
-        cache[key] = result
-        inflight[key] = nil
+        // 스캔 도중 invalidate가 이 항목을 지웠으면 옛 결과를 캐시에 남기지 않는다(호출자에겐 그대로 돌려줌 — 다음 요청이 재스캔)
+        if inflight[key]?.id == scanID {
+            cache[key] = result
+            inflight[key] = nil
+        }
         return result
     }
 
-    /// 파일 조작·FSEvents 후 stale 방지 — 직계 자식만 무효화(전체 무효화는 재스캔 폭주)
+    /// 파일 조작·FSEvents 후 stale 방지 — 직계 자식만 무효화(전체 무효화는 재스캔 폭주). 진행 중 스캔도 함께 무효화(A21).
     func invalidate(childrenOf directory: URL) {
         let prefix = Self.key(directory) + "/"
-        for key in cache.keys where key.hasPrefix(prefix) && !key.dropFirst(prefix.count).contains("/") {
-            cache[key] = nil
-        }
+        func isDirectChild(_ key: String) -> Bool { key.hasPrefix(prefix) && !key.dropFirst(prefix.count).contains("/") }
+        for key in cache.keys where isDirectChild(key) { cache[key] = nil }
+        for key in inflight.keys where isDirectChild(key) { inflight[key] = nil }
         // 부모 체인도 stale — 상위 폴더 측정값 무효화
         var parent = directory
         while parent.pathComponents.count > 1 {
             cache[Self.key(parent)] = nil
+            inflight[Self.key(parent)] = nil
             parent.deleteLastPathComponent()
         }
     }

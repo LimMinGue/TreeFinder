@@ -38,7 +38,7 @@ enum HWPPreview {
         process.arguments = ["-p", archive.path, entry]
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()   // 에러 출력은 버림
+        process.standardError = FileHandle.nullDevice   // 읽지 않는 Pipe는 64KB에서 자식이 블록됨 — 버리려면 nullDevice (A4)
         guard (try? process.run()) != nil else { return nil }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
@@ -193,6 +193,28 @@ enum HWPRenderer {
         return url
     }
 
+    private static let cacheLimitBytes: Int64 = 500 << 20   // 렌더 캐시 총량 상한 — 초과 시 오래된 렌더부터 삭제 (2026-09-05 A15)
+
+    /// 캐시 총량이 상한을 넘으면 수정일이 오래된 렌더 폴더부터 삭제 — 렌더 완료 직후(백그라운드) 호출.
+    /// 방금 승격한 폴더가 가장 새것이라 마지막까지 남는다.
+    private static func pruneCache(root: URL) {
+        let fm = FileManager.default
+        guard let dirs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey],
+                                                     options: [.skipsHiddenFiles]) else { return }
+        var entries: [(url: URL, date: Date, size: Int64)] = []
+        for dir in dirs {
+            let date = (try? dir.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            let files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+            let size = files.reduce(Int64(0)) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0) }
+            entries.append((dir, date, size))
+        }
+        var total = entries.reduce(Int64(0)) { $0 + $1.size }
+        for entry in entries.sorted(by: { $0.date < $1.date }) where total > cacheLimitBytes {
+            try? fm.removeItem(at: entry.url)
+            total -= entry.size
+        }
+    }
+
     /// 캐시 폴더 — 키 = SHA256(NFC 경로 | 수정일): 내용이 바뀌면 자동 재렌더
     private static func cacheDirectory(for url: URL) -> URL? {
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
@@ -215,8 +237,9 @@ enum HWPRenderer {
             process.executableURL = binary
             // --font-style: 시스템 폰트 local() 참조 — NSImage(CoreSVG)가 로컬 폰트로 텍스트 렌더
             process.arguments = ["export-svg", url.path, "-o", staging.path, "--font-style"]
-            process.standardOutput = Pipe()
-            process.standardError = Pipe()
+            // 읽지 않는 Pipe는 64KB에서 rhwp가 블록돼 타임아웃까지 헛돈다 — 출력은 버린다(A4, ArchiveListing 규약)
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
             guard (try? process.run()) != nil else { return nil }
             let killer = DispatchWorkItem { if process.isRunning { process.terminate() } }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds, execute: killer)
@@ -228,6 +251,7 @@ enum HWPRenderer {
             }
             try? fm.removeItem(at: cacheDir)
             try? fm.moveItem(at: staging, to: cacheDir)   // 완성본만 캐시로 승격 — 부분 결과 방지
+            pruneCache(root: cacheDir.deletingLastPathComponent())   // 총량 상한 — 무한 성장 차단 (A15)
         }
         guard let files = try? fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) else { return nil }
         let svgs = files.filter { $0.pathExtension.lowercased() == "svg" }
@@ -252,7 +276,10 @@ private struct CFBReader {
     private static let endOfChain: UInt32 = 0xFFFFFFFE
     private static let freeSect: UInt32 = 0xFFFFFFFF
     private static let miniCutoff = 4096
-    private static let chainCap = 1 << 20   // 순환 체인 방어
+    // 체인 상한 = 파일이 가진 섹터 수 + 1 — 유효 체인은 그보다 길 수 없다. 종전 고정 상한(1M 섹터)은 순환 FAT를 가진
+    // 조작 파일에서 최대 4GB까지 이어 붙일 수 있었다(2026-09-05 A14). 스트림 크기도 파일 크기 이하로만 신뢰.
+    private var maxSectors: Int { data.count / sectorSize + 1 }
+    private var maxMiniSectors: Int { miniStream.count / miniSectorSize + 1 }
 
     /// 리틀엔디언 UInt32 — Data 슬라이스의 startIndex 오프셋 주의
     private static func u32(in chunk: Data, at offset: Int) -> UInt32 {
@@ -316,10 +343,11 @@ private struct CFBReader {
         }
         self.fat = fat
 
+        let sectorCap = data.count / sectorSize + 1   // 유효 체인 상한(A14) — self.maxSectors는 init 완료 전이라 지역 계산
         func chain(from start: UInt32, table: [UInt32]) -> [UInt32] {
             var sectors: [UInt32] = []
             var current = start
-            while current < Self.endOfChain - 1, sectors.count < Self.chainCap {
+            while current < Self.endOfChain - 1, sectors.count < sectorCap {
                 sectors.append(current)
                 guard Int(current) < table.count else { return sectors }
                 current = table[Int(current)]
@@ -328,6 +356,7 @@ private struct CFBReader {
         }
 
         func readChain(_ start: UInt32, size: Int) -> Data? {
+            guard size <= data.count else { return nil }   // 헤더가 주장하는 크기가 파일보다 크면 조작/손상 — 할당 전에 거절(A14)
             var out = Data(capacity: size)
             for sector in chain(from: start, table: fat) {
                 guard let chunk = sectorData(sector) else { return nil }
@@ -383,12 +412,12 @@ private struct CFBReader {
     /// 이름으로 스트림 읽기 — 4096 미만은 miniFAT 체인(미니 스트림 내부), 이상은 FAT 체인
     func stream(named name: String) -> Data? {
         guard let entry = entries.first(where: { $0.name == name && $0.type == 2 }),
-              entry.size > 0, entry.size < 64 << 20 else { return nil }
+              entry.size > 0, entry.size <= data.count else { return nil }   // 파일보다 큰 스트림 크기 = 손상 (A14)
         if entry.size < Self.miniCutoff {
             var out = Data(capacity: entry.size)
             var current = entry.start
             var hops = 0
-            while current < Self.endOfChain - 1, hops < Self.chainCap {
+            while current < Self.endOfChain - 1, hops < maxMiniSectors {
                 let start = Int(current) * miniSectorSize
                 guard start >= 0, start + miniSectorSize <= miniStream.count else { return nil }
                 out.append(miniStream.subdata(in: start..<(start + miniSectorSize)))
@@ -404,7 +433,7 @@ private struct CFBReader {
         var out = Data(capacity: entry.size)
         var current = entry.start
         var hops = 0
-        while current < Self.endOfChain - 1, hops < Self.chainCap {
+        while current < Self.endOfChain - 1, hops < maxSectors {
             let start = 512 + Int(current) * sectorSize
             guard start >= 512, start + sectorSize <= data.count else { return nil }
             out.append(data.subdata(in: start..<(start + sectorSize)))

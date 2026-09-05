@@ -1,0 +1,118 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "NSDesktopFolderUsageDescription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TreeFinder shows the files in your Desktop folder. Nothing leaves this Mac."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TreeFinder가 데스크탑 폴더의 파일을 표시합니다. 어떤 정보도 이 Mac 밖으로 나가지 않습니다."
+          }
+        }
+      }
+    },
+    "NSDocumentsFolderUsageDescription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TreeFinder shows the files in your Documents folder. Nothing leaves this Mac."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TreeFinder가 문서 폴더의 파일을 표시합니다. 어떤 정보도 이 Mac 밖으로 나가지 않습니다."
+          }
+        }
+      }
+    },
+    "NSDownloadsFolderUsageDescription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TreeFinder shows the files in your Downloads folder. Nothing leaves this Mac."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TreeFinder가 다운로드 폴더의 파일을 표시합니다. 어떤 정보도 이 Mac 밖으로 나가지 않습니다."
+          }
+        }
+      }
+    },
+    "NSHumanReadableCopyright": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copyright © 2026 LimMinGue. All rights reserved."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copyright © 2026 LimMinGue. All rights reserved."
+          }
+        }
+      }
+    },
+    "NSLocalNetworkUsageDescription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TreeFinder uses the local network to find computers and NAS devices in the Network view."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "네트워크 보기에서 같은 네트워크의 컴퓨터와 NAS를 찾는 데 사용됩니다."
+          }
+        }
+      }
+    },
+    "NSNetworkVolumesUsageDescription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TreeFinder shows the files on network volumes you connect to. Nothing leaves this Mac."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TreeFinder가 연결한 네트워크 볼륨의 파일을 표시합니다. 어떤 정보도 이 Mac 밖으로 나가지 않습니다."
+          }
+        }
+      }
+    },
+    "NSRemovableVolumesUsageDescription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TreeFinder shows the files on USB and other removable volumes and can eject them. Nothing leaves this Mac."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TreeFinder가 USB 등 이동식 볼륨의 파일을 표시하고 추출할 수 있습니다. 어떤 정보도 이 Mac 밖으로 나가지 않습니다."
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}

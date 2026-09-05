@@ -130,6 +130,15 @@ final class DropTerminalView: LocalProcessTerminalView {
     }
 }
 
+/// WKScriptMessageHandler 약한 프록시 — 웹뷰 구성이 핸들러를 강참조해 생기는 순환 참조 차단 (2026-09-05 A12)
+private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
+    private weak var target: WKScriptMessageHandler?
+    init(_ target: WKScriptMessageHandler) { self.target = target }
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        target?.userContentController(controller, didReceive: message)
+    }
+}
+
 /// 터미널 영역 전체(도움말 밴드·디바이더 포함)를 드롭존으로 — 터미널 본체 미스 드롭 보완 (제작자 제보 2026-07-17)
 final class TerminalSplitView: NSSplitView {
     var onDropFiles: (([URL]) -> Void)?
@@ -228,7 +237,12 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         return scroll
     }()
     private var observingSettings = false
+    private var observers: [NSObjectProtocol] = []   // NotificationCenter 토큰 — deinit 해제 (A12)
     private var currentURL: URL?
+
+    deinit {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
 
     // 자체 미리보기 — HWP/HWPX(rhwp 전 페이지)·일반 이미지 공용 파이프라인 (decisions §15)
     // QLPreviewView는 배율 API가 없어 확대/축소 대상 콘텐츠는 자체 스크롤로 표시 (2026-07-16 제작자 지시)
@@ -332,10 +346,10 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             scroll.allowsMagnification = true
             scroll.minMagnification = 0.25
             scroll.maxMagnification = 5.0
-            NotificationCenter.default.addObserver(forName: NSScrollView.didEndLiveMagnifyNotification,
-                                                   object: scroll, queue: .main) { [weak self] _ in
+            observers.append(NotificationCenter.default.addObserver(
+                forName: NSScrollView.didEndLiveMagnifyNotification, object: scroll, queue: .main) { [weak self] _ in
                 self?.updateZoomLabel()
-            }
+            })
         }
         for (button, tooltip) in [(zoomOutButton, L("Zoom Out")), (zoomInButton, L("Zoom In")),
                                   (zoomResetButton, L("Actual Size"))] {
@@ -603,7 +617,8 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     private func ensureMarkdownEditor() -> WKWebView {
         if let mdWebView { return mdWebView }
         let configuration = WKWebViewConfiguration()
-        configuration.userContentController.add(self, name: "tf")
+        // WKUserContentController는 핸들러를 강참조 — 컨트롤러가 웹뷰를 소유하므로 순환 참조(창을 닫아도 미해제)라 약한 프록시 (A12)
+        configuration.userContentController.add(WeakScriptHandler(self), name: "tf")
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         webView.isHidden = true
@@ -672,19 +687,35 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     @objc private func saveMarkdown() {
         guard let url = mdCurrentURL, let webView = mdWebView else { return }
         webView.evaluateJavaScript("tfGetMarkdown()") { [weak self] result, _ in
-            guard let self, let markdown = result as? String else { return }
-            do {
-                try markdown.write(to: url, atomically: true, encoding: .utf8)
-                self.mdDirty = false
-                self.updateVisibility()
-            } catch {
-                guard let window = self.view.window else { return }
+            guard let self, let markdown = result as? String, self.writeMarkdown(markdown, to: url) else { return }
+            self.mdDirty = false
+            self.updateVisibility()
+        }
+    }
+
+    /// 마크다운 디스크 쓰기 단일 창구 — 저장 버튼·⌘S·선택 이동 시 저장 시트 공용. 실패는 표면화(조용한 유실 금지, decisions §16).
+    /// 종전엔 이동 시 저장 시트 경로가 `try?`로 실패를 삼키고 dirty를 풀어 편집이 소리 없이 사라질 수 있었다(2026-09-05 A2).
+    @discardableResult
+    private func writeMarkdown(_ markdown: String, to url: URL) -> Bool {
+        do {
+            try markdown.write(to: url, atomically: true, encoding: .utf8)
+            return true
+        } catch {
+            if let window = view.window {
                 let alert = NSAlert()
                 alert.messageText = L("Couldn't save the file.")
                 alert.informativeText = error.localizedDescription
                 alert.beginSheetModal(for: window)
             }
+            return false
         }
+    }
+
+    /// 버리기 = 에디터 잔존 상태 무효화 — 같은 파일 재선택 시 loadMarkdown의 "같은 파일" 가드가 디스크 대신
+    /// 버린 편집 내용을 다시 보여주던 문제(2026-09-05 A2). 알림 시트의 버리기 분기와 검증 훅이 공용.
+    private func discardMarkdownEdits() {
+        mdDirty = false
+        mdCurrentURL = nil
     }
 
     /// 선택 이동 시 저장 안 된 변경 처리 — 저장/버리기 시트 후 이어서 진행
@@ -701,15 +732,14 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         alert.beginSheetModal(for: window) { [weak self] response in
             guard let self else { return }
             if response == .alertFirstButtonReturn {
+                // 저장 실패면 dirty·현재 파일을 유지한 채 멈춘다(오류 알림) — 다음 선택에서 다시 묻는다 (A2)
                 webView.evaluateJavaScript("tfGetMarkdown()") { result, _ in
-                    if let markdown = result as? String {
-                        try? markdown.write(to: url, atomically: true, encoding: .utf8)
-                    }
+                    guard let markdown = result as? String, self.writeMarkdown(markdown, to: url) else { return }
                     self.mdDirty = false
                     completion()
                 }
             } else {
-                self.mdDirty = false
+                self.discardMarkdownEdits()
                 completion()
             }
         }
@@ -891,6 +921,8 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     @objc private func tabChanged() {
         if tabs.selectedSegment == 1 { ensureTerminal() }
         updateVisibility()
+        // 터미널 탭으로 "전환한 순간"에만 포커스 — updateVisibility마다 강제하면 검색 필드 등 포커스를 계속 뺏는다(2026-09-05 A20)
+        if tabs.selectedSegment == 1, let terminalView { view.window?.makeFirstResponder(terminalView) }
     }
 
     /// 셸은 창당 1개 — 탭 전환·패널 접힘에도 생존 (decisions §6)
@@ -941,9 +973,9 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         DispatchQueue.main.async { [weak self] in self?.showTerminalHelp(TerminalHelp.general) }
         if !observingSettings {
             observingSettings = true
-            NotificationCenter.default.addObserver(forName: .settingsChanged, object: nil, queue: .main) {
+            observers.append(NotificationCenter.default.addObserver(forName: .settingsChanged, object: nil, queue: .main) {
                 [weak self] _ in self?.applyTerminalSettings()
-            }
+            })
         }
     }
 
@@ -1129,9 +1161,9 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title) }
             return item
         }
-        menu.addItem(entry(L("Copy"), "doc.on.doc", Selector(("copy:")), terminal))
-        menu.addItem(entry(L("Paste"), "doc.on.clipboard", Selector(("paste:")), terminal))
-        menu.addItem(entry(L("Select All"), "checklist", Selector(("selectAll:")), terminal))
+        menu.addItem(entry(L("Copy"), "doc.on.doc", #selector(NSText.copy(_:)), terminal))
+        menu.addItem(entry(L("Paste"), "doc.on.clipboard", #selector(NSText.paste(_:)), terminal))
+        menu.addItem(entry(L("Select All"), "checklist", #selector(NSText.selectAll(_:)), terminal))
         menu.addItem(.separator())
         menu.addItem(entry(L("Search the Web for Selection"), "magnifyingglass",
                            #selector(searchWebForSelection), self))
@@ -1165,6 +1197,7 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         terminalSessions[activeTerminalIndex] = makeTerminalSession(startingAt: old.spawnDirectory)   // 이전 참조 해제 → PTY SIGHUP
         mountTerminal(terminalSessions[activeTerminalIndex])
         updateVisibility()
+        view.window?.makeFirstResponder(terminalSessions[activeTerminalIndex])   // 새 셸에 포커스 (A20: updateVisibility가 더는 안 함)
     }
 
     /// 설정 변경(폰트·테마) 반영 — 전 세션 + 여백 배경까지 한 번에
@@ -1394,6 +1427,27 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             self?.saveMarkdown()
         }
     }
+
+    /// TF_MD_DISCARD=<다른 파일 경로> — (TF_PREVIEW_FILE=A.md 병용) A 편집 주입 → 버리기 → 다른 파일 → A 재선택 후
+    /// 에디터 내용이 디스크 원문과 같은지 실측(수정 전엔 버린 편집이 그대로 보였다, A2)
+    func debugMarkdownDiscardTest(other: URL) {
+        guard let original = currentURL, let webView = mdWebView else { return }
+        webView.evaluateJavaScript("editor.setMarkdown('# 버릴 편집')") { [weak self] _, _ in
+            guard let self else { return }
+            self.discardMarkdownEdits()          // 시트의 "버리기" 분기와 같은 루틴
+            self.show(other)
+            self.show(original)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                webView.evaluateJavaScript("tfGetMarkdown()") { result, _ in
+                    let editor = (result as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let disk = ((try? String(contentsOf: original, encoding: .utf8)) ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    NSLog("MD_DISCARD editorMatchesDisk=%@ editor=[%@]", editor == disk ? "true" : "false",
+                          String(editor.prefix(40)))
+                }
+            }
+        }
+    }
     #endif
 
     private func updateVisibility() {
@@ -1421,7 +1475,6 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         if zoomable { updateZoomLabel() }
         placeholder.isHidden = terminal || currentURL != nil
         infoStack.isHidden = terminal || currentURL == nil
-        if terminal, let terminalView { view.window?.makeFirstResponder(terminalView) }
     }
 }
 

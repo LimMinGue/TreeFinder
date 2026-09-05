@@ -130,6 +130,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     NSLog("NETWORK hosts: %@", NetworkBrowser.shared.hosts.joined(separator: ", "))
                 }
             }
+            // 가상 항목에 파일 조작 가드(A10): Enter=rename이 편집에 못 들어가야 하고, 항목 메뉴는 "연결"뿐
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
+                wc.debugSelectFirstFile()
+                wc.debugRename()
+                NSLog("NETWORK rename %@ | menu: [%@]", wc.debugEditingState(), wc.debugItemMenuTitles().joined(separator: " | "))
+            }
         }
         // TF_STACK_DROP=move|copy|prune;<src경로> → 드롭스택 명시 이동/복사·완료 비움·소멸 정리 검증 (TF_START_DIR=목적지 병용)
         if let spec = ProcessInfo.processInfo.environment["TF_STACK_DROP"] {
@@ -762,12 +768,105 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { wc.debugTypeSelectProbe() }
         }
         // TF_COLUMNS=1 → (TF_START_DIR 병용) 컬럼 뷰 전환 + 폴더 선택 캐스케이드 실측 (제작자 지시 2026-07-25)
+        // + 시작 폴더에 .sh가 있으면 파일 더블클릭 경로(openSelected → 터미널 탭 실행)까지 — 수정 전엔 TF_OPEN_SELECTED items=[] (A1)
         if ProcessInfo.processInfo.environment["TF_COLUMNS"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { wc.debugSetViewStyle("columns") }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { wc.debugBrowserSelectFolder() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
                 NSLog("COLUMNS selection=%@", wc.debugBrowserSelection())
                 Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-columns.png")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { wc.debugBrowserSelectFile() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-columns-open.png")
+            }
+        }
+        // TF_TRASH_MENU=1 → (TF_START_DIR=~/.Trash 병용) 휴지통 위생 — 항목·배경 메뉴 구성 로그 + 렌더 (A19)
+        if ProcessInfo.processInfo.environment["TF_TRASH_MENU"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                NSLog("TRASH_MENU item: [%@]", wc.debugItemMenuTitles().joined(separator: " | "))
+                NSLog("TRASH_MENU background: [%@]", wc.debugBackgroundMenuTitles().joined(separator: " | "))
+                wc.debugRename()   // 휴지통 안 rename = 진입 금지
+                NSLog("TRASH_MENU rename %@", wc.debugEditingState())
+            }
+            // ⌘⌫ = "즉시 삭제…" 확인 시트(기본 버튼 = 취소) 렌더 — 시트는 별도 창이라 창 서버 캡처로
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { wc.debugSelectFirstFile(); wc.deleteSelected(nil) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.4) {
+                guard let sheet = wc.window?.attachedSheet else { NSLog("TRASH_MENU sheet=none"); return }
+                NSLog("TRASH_MENU sheet=%@", sheet.title.isEmpty ? "attached" : sheet.title)
+                if let cg = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(sheet.windowNumber),
+                                                    [.boundsIgnoreFraming, .bestResolution]), cg.width > 1 {
+                    try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?
+                        .write(to: URL(fileURLWithPath: "/tmp/treefinder-trash-sheet.png"))
+                }
+                NSApp.abortModal()
+                sheet.sheetParent?.endSheet(sheet, returnCode: .cancel)   // 취소 = 삭제 안 함(픽스처 보존)
+            }
+        }
+        // TF_COMPRESS=1 → (TF_START_DIR=픽스처 병용: '-r'·'--help'·normal.txt) 전체 선택 압축 → 아카이브 항목 수 실측 (A3)
+        if ProcessInfo.processInfo.environment["TF_COMPRESS"] == "1" {
+            let dir = startDirectory
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { wc.debugSelectAll(); wc.debugCompress() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+                let zips = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasSuffix(".zip") }
+                var listed = "없음"
+                if let zip = zips.first {
+                    let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+                    p.arguments = ["-Z1", dir.appendingPathComponent(zip).path]
+                    let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+                    try? p.run()
+                    let data = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+                    listed = String(decoding: data, as: UTF8.self).split(separator: "\n").joined(separator: ",")
+                }
+                NSLog("COMPRESS zips=%@ entries=[%@]", zips.description, listed)
+            }
+        }
+        // TF_MD_DISCARD=<다른 파일> → (TF_PREVIEW_FILE=A.md 병용) 편집 주입 → 버리기 → 다른 파일 → A 재선택 = 디스크 원문 (A2)
+        if let otherPath = ProcessInfo.processInfo.environment["TF_MD_DISCARD"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                wc.debugMarkdownDiscardTest(other: URL(fileURLWithPath: otherPath))
+            }
+        }
+        // TF_TREE_CLICK=1 → 트리 홈 행 합성 클릭 1회 = show() 1회 (수정 전 2회 — 선택 델리게이트 + action 이중 발화, A16)
+        if ProcessInfo.processInfo.environment["TF_TREE_CLICK"] == "1" {
+            var before = 0
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { wc.debugClickTreeHome() }   // 창 활성화 클릭에 먹힐 수 있는 예열
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                before = wc.debugShowCount()
+                NSLog("TREE_CLICK before=%d dir=%@", before, wc.debugCurrentDirectory())
+                wc.debugClickTreeHome()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) {
+                NSLog("TREE_CLICK showDelta=%d (1 기대) dir=%@ tree=%@",
+                      wc.debugShowCount() - before, wc.debugCurrentDirectory(), wc.debugTreeSelectedName())
+            }
+        }
+        // TF_UNDO_MOVE=<파일> → (TF_START_DIR 병용) 파일을 하위 '문서' 폴더로 이동(드롭 경로) → ⌘Z → 원위치 복귀 실측 (A13 엔진 경유 undo)
+        if let movePath = ProcessInfo.processInfo.environment["TF_UNDO_MOVE"] {
+            let source = URL(fileURLWithPath: movePath)
+            let dest = startDirectory.appendingPathComponent("문서")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { wc.debugPerformDrop(source, into: dest) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                NSLog("UNDO_MOVE afterMove srcExists=%d destExists=%d",
+                      FileManager.default.fileExists(atPath: source.path) ? 1 : 0,
+                      FileManager.default.fileExists(atPath: dest.appendingPathComponent(source.lastPathComponent).path) ? 1 : 0)
+                wc.debugUndo()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
+                NSLog("UNDO_MOVE afterUndo srcExists=%d destExists=%d (1/0 기대)",
+                      FileManager.default.fileExists(atPath: source.path) ? 1 : 0,
+                      FileManager.default.fileExists(atPath: dest.appendingPathComponent(source.lastPathComponent).path) ? 1 : 0)
+            }
+        }
+        // TF_OPEN_LICENSES=1 → Help ▸ 오픈 소스 라이선스 창을 열고 별도 스냅숏 (decisions §34 목업/렌더 확인)
+        if ProcessInfo.processInfo.environment["TF_OPEN_LICENSES"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in self?.showOpenSourceLicenses(nil) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                guard let window = NSApp.keyWindow, window.title == L("Open Source Licenses"),
+                      let view = window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+                window.effectiveAppearance.performAsCurrentDrawingAppearance { view.cacheDisplay(in: view.bounds, to: rep) }
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "/tmp/treefinder-licenses.png"))
+                NSLog("LICENSES window frame: %@", NSStringFromRect(window.frame))
             }
         }
         // TF_SET_TAG=<1~7> → (TF_START_DIR 병용) 첫 항목에 색상 태그 적용 후 목록 행 색 + 스와치 뷰 렌더 검증 (제작자 지시 2026-07-23)
@@ -875,8 +974,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addSubmenu(fileMenu, titled: L("File"), to: main)
 
         let editMenu = NSMenu(title: L("Edit"))
-        editMenu.addItem(withTitle: L("Undo"), action: Selector(("undo:")), keyEquivalent: "z")
-        let redo = NSMenuItem(title: L("Redo"), action: Selector(("redo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: L("Undo"), action: #selector(FileListViewController.undo(_:)), keyEquivalent: "z")
+        let redo = NSMenuItem(title: L("Redo"), action: #selector(FileListViewController.redo(_:)), keyEquivalent: "z")
         redo.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(redo)
         editMenu.addItem(.separator())
@@ -989,6 +1088,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let reportBug = NSMenuItem(title: L("Report a Bug…"), action: #selector(reportBug(_:)), keyEquivalent: "")
         reportBug.target = self
         helpMenu.addItem(reportBug)
+        helpMenu.addItem(.separator())
+        // 동반 오픈 소스 고지(MIT 등 "모든 사본에 고지 포함" 조건 이행) — 제작자 확정 2026-09-05, decisions §34
+        let licenses = NSMenuItem(title: L("Open Source Licenses…"),
+                                  action: #selector(showOpenSourceLicenses(_:)), keyEquivalent: "")
+        licenses.target = self
+        helpMenu.addItem(licenses)
         addSubmenu(helpMenu, titled: L("Help"), to: main)
         NSApp.helpMenu = helpMenu   // 시스템 검색 필드 자동 포함
 
@@ -1013,6 +1118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          .paragraphStyle: paragraph]))
         NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
     }
+
+    @objc private func showOpenSourceLicenses(_ sender: Any?) { LicensesWindowController.show() }
 
     @objc private func reportBug(_ sender: Any?) {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"

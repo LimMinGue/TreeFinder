@@ -17,9 +17,11 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.4.6</string>
+	<string>0.5.0</string>
 	<key>CFBundleVersion</key>
-	<string>15</string>
+	<string>16</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>NSBonjourServices</key>
@@ -32,9 +34,15 @@
 	<string>TreeFinder shows the files in your Documents folder. Nothing leaves this Mac.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>TreeFinder shows the files in your Downloads folder. Nothing leaves this Mac.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 LimMinGue. All rights reserved.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>네트워크 보기에서 같은 네트워크의 컴퓨터와 NAS를 찾는 데 사용됩니다.</string>
+	<string>TreeFinder uses the local network to find computers and NAS devices in the Network view.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>TreeFinder shows the files on network volumes you connect to. Nothing leaves this Mac.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>TreeFinder shows the files on USB and other removable volumes and can eject them. Nothing leaves this Mac.</string>
 </dict>
 </plist>

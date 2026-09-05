@@ -1,21 +1,77 @@
-MIT License
+TreeFinder 소프트웨어 사용권 계약 / TreeFinder Software License Agreement
 
-Copyright (c) 2026 LimMinGue
+Copyright © 2026 LimMinGue. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+────────────────────────────────────────────────────────────────────────
+[한국어]
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. 저작권. 이 소프트웨어(TreeFinder — 소스 코드, 실행 파일, 문서, 아이콘 및
+   기타 자료 일체)의 저작권과 그 밖의 지식재산권은 LimMinGue(이하 "저작권자")에게
+   있습니다.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. 사용 허락. 저작권자는 사용자에게 이 소프트웨어를 저작권자가 배포한 형태
+   그대로 사용할 수 있는, 비독점적·양도 불가능한 권리를 부여합니다. 저작권자의
+   별도 서면 허락 없이 이 소프트웨어의 전부 또는 일부를 복제·재배포·판매·임대·
+   대여·수정·번역·역공학·디컴파일·2차 저작물 제작에 이용할 수 없습니다. 다만
+   관련 법령이 명시적으로 허용하는 범위(예: 상호운용성 확보를 위한 분석)는
+   예외로 합니다.
+
+3. 이전 버전. 2026년 8월 7일 이전에 MIT 라이선스로 공개된 버전(v0.4.6 이하)은
+   해당 버전에 한해 계속 MIT 라이선스가 적용됩니다. 본 계약은 그 버전들에
+   소급 적용되지 않습니다.
+
+4. 제3자 구성 요소. 이 소프트웨어에는 오픈 소스 구성 요소가 포함되어 있으며,
+   각 구성 요소는 자체 라이선스를 따릅니다. 목록과 라이선스 원문은 동봉된
+   THIRD-PARTY-NOTICES.txt(앱 안에서는 도움말 ▸ 오픈 소스 라이선스)에 있습니다.
+   본 계약은 그 라이선스가 사용자에게 부여하는 권리를 제한하지 않습니다.
+
+5. 보증의 부인. 이 소프트웨어는 "있는 그대로" 제공되며, 저작권자는 상품성·
+   특정 목적 적합성·비침해를 포함한 어떠한 명시적·묵시적 보증도 하지 않습니다.
+
+6. 책임의 제한. 관련 법령이 허용하는 최대 범위에서, 저작권자는 이 소프트웨어의
+   사용 또는 사용 불능으로 인해 발생하는 데이터 손실·이익 상실·영업 중단 등
+   직접·간접·부수·특별·결과적 손해에 대해 책임을 지지 않습니다.
+
+7. 종료. 사용자가 본 계약을 위반하면 사용권은 자동으로 종료되며, 사용자는
+   보유한 이 소프트웨어의 사본을 모두 삭제해야 합니다.
+
+────────────────────────────────────────────────────────────────────────
+[English]
+
+1. Copyright. The copyright and all other intellectual property rights in this
+   software (TreeFinder — including its source code, executables, documentation,
+   icons and other materials) belong to LimMinGue (the "Licensor").
+
+2. Grant. The Licensor grants you a non-exclusive, non-transferable right to use
+   this software in the form distributed by the Licensor. Without the Licensor's
+   prior written permission you may not copy, redistribute, sell, rent, lease,
+   modify, translate, reverse engineer, decompile or create derivative works of
+   this software, in whole or in part, except to the extent that applicable law
+   expressly permits (for example, analysis for interoperability).
+
+3. Earlier versions. Versions released under the MIT License before
+   August 7, 2026 (v0.4.6 and earlier) remain available under the MIT License
+   for those versions only. This agreement does not apply retroactively to them.
+
+4. Third-party components. This software contains open-source components,
+   each governed by its own license. The list and the full license texts are in
+   the accompanying THIRD-PARTY-NOTICES.txt (in the app: Help ▸ Open Source
+   Licenses). Nothing in this agreement limits the rights those licenses grant
+   you.
+
+5. Disclaimer of warranty. This software is provided "AS IS", without warranty
+   of any kind, express or implied, including but not limited to the warranties
+   of merchantability, fitness for a particular purpose and non-infringement.
+
+6. Limitation of liability. To the maximum extent permitted by applicable law,
+   the Licensor shall not be liable for any direct, indirect, incidental,
+   special or consequential damages — including loss of data, loss of profits
+   or business interruption — arising out of the use of or inability to use
+   this software.
+
+7. Termination. This license terminates automatically if you breach this
+   agreement, and you must then delete all copies of the software in your
+   possession.
+
+In case of any discrepancy between the Korean and English texts, the Korean
+text prevails. / 한국어본과 영어본이 다를 경우 한국어본이 우선합니다.

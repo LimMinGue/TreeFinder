@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 enum SettingsKeys {
     static let isoDates = "DateFormatISO"
@@ -42,13 +43,34 @@ struct SettingsView: View {
         return families
     }()
 
-    private let terminalCandidates: [(name: String, path: String)] = {
-        let known = [SettingsKeys.defaultTerminal, "/Applications/iTerm.app", "/Applications/Warp.app",
+    /// 터미널 후보 = 알려진 앱 중 설치된 것 + 저장된 사용자 지정 앱("Other…"로 고른 것). 저장값이 후보에 없으면
+    /// SwiftUI Picker가 빈 선택으로 어긋나던 것 교정 + 원본 명세(DESIGN_REFERENCE §11)의 Other… 복원 (2026-09-05 A18)
+    @State private var terminalCandidates: [(name: String, path: String)] =
+        SettingsView.knownTerminals(including: UserDefaults.standard.string(forKey: SettingsKeys.terminalApp))
+
+    private static func knownTerminals(including saved: String?) -> [(name: String, path: String)] {
+        var paths = [SettingsKeys.defaultTerminal, "/Applications/iTerm.app", "/Applications/Warp.app",
                      "/Applications/Ghostty.app", "/Applications/WezTerm.app",
                      "/Applications/Tabby.app", "/Applications/Hyper.app"]
-        return known.filter { FileManager.default.fileExists(atPath: $0) }
-            .map { (FileManager.default.displayName(atPath: $0), $0) }
-    }()
+            .filter { FileManager.default.fileExists(atPath: $0) }
+        if let saved, FileManager.default.fileExists(atPath: saved), !paths.contains(saved) { paths.append(saved) }
+        return paths.map { (FileManager.default.displayName(atPath: $0), $0) }
+    }
+
+    /// Other… — 임의 앱 선택(NSOpenPanel). 목록에 추가하고 즉시 선택.
+    private func chooseOtherTerminal() {
+        let panel = NSOpenPanel()
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.allowedContentTypes = [.application]
+        panel.canChooseDirectories = false
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            if !terminalCandidates.contains(where: { $0.path == url.path }) {
+                terminalCandidates.append((FileManager.default.displayName(atPath: url.path), url.path))
+            }
+            terminalApp = url.path
+        }
+    }
 
     var body: some View {
         Form {
@@ -69,10 +91,13 @@ struct SettingsView: View {
             }
 
             Section {
-                Picker("Open in Terminal with", selection: $terminalApp) {
-                    ForEach(terminalCandidates, id: \.path) { candidate in
-                        Text(candidate.name).tag(candidate.path)
+                HStack {
+                    Picker("Open in Terminal with", selection: $terminalApp) {
+                        ForEach(terminalCandidates, id: \.path) { candidate in
+                            Text(candidate.name).tag(candidate.path)
+                        }
                     }
+                    Button("Other…") { chooseOtherTerminal() }
                 }
                 Picker("Terminal font", selection: $terminalFontName) {
                     ForEach(monoFamilies, id: \.self) { Text($0).tag($0) }
@@ -101,6 +126,8 @@ struct SettingsView: View {
         .formStyle(.grouped)
         // 높이 미지정 시 호스팅 창이 480×32로 붕괴(fitting-size 함정 실측 2026-07-16) — 고정 크기 필수
         .frame(width: 480, height: 540)
+        // 저장된 터미널 앱이 삭제됐으면 기본 Terminal로 되돌린다 — ExternalOpen의 폴백과 화면 표시를 일치(A18)
+        .onAppear { if !FileManager.default.fileExists(atPath: terminalApp) { terminalApp = SettingsKeys.defaultTerminal } }
         .onChange(of: isoDates) { NotificationCenter.default.post(name: .settingsChanged, object: nil) }
         .onChange(of: alwaysExtensions) { NotificationCenter.default.post(name: .settingsChanged, object: nil) }
         .onChange(of: terminalFontName) { NotificationCenter.default.post(name: .settingsChanged, object: nil) }

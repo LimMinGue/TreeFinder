@@ -1970,6 +1970,106 @@
           }
         }
       }
+    },
+    "Are you sure you want to delete the %d selected items?": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "선택한 %d개 항목을 삭제하겠습니까?"
+          }
+        }
+      }
+    },
+    "Are you sure you want to delete “%@”?": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“%@”을(를) 삭제하겠습니까?"
+          }
+        }
+      }
+    },
+    "Delete": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "삭제"
+          }
+        }
+      }
+    },
+    "Delete Immediately…": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "즉시 삭제…"
+          }
+        }
+      }
+    },
+    "Deleting items…": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "항목 삭제 중…"
+          }
+        }
+      }
+    },
+    "Open Source Licenses": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "오픈 소스 라이선스"
+          }
+        }
+      }
+    },
+    "Open Source Licenses…": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "오픈 소스 라이선스…"
+          }
+        }
+      }
+    },
+    "The notices file could not be found in this copy of TreeFinder.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 TreeFinder 사본에서 고지 파일을 찾을 수 없습니다."
+          }
+        }
+      }
+    },
+    "The selected items will be deleted immediately. You can’t undo this action.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "선택한 항목은 즉시 삭제됩니다. 이 동작은 실행 취소할 수 없습니다."
+          }
+        }
+      }
+    },
+    "Undo %@": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 실행 취소"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

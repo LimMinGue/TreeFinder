@@ -397,6 +397,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     private var forwardStack: [URL] = []
     private var navigatingViaHistory = false
     private var fsEventStream: FSEventStreamRef?
+    private var observers: [NSObjectProtocol] = []          // NotificationCenter 토큰 — deinit 해제 (A12)
+    private var workspaceObserver: NSObjectProtocol?
     private var pendingRefresh = false   // EditGuard — rename 편집 중 보류된 갱신
     private var pendingRenameURL: URL?   // 새 폴더 생성 직후 이름변경 진입 대상 (제작자 지시 2026-07-23)
     private var folderSizes: [String: FolderSize] = [:]   // 표시용 사본 (진실은 SizeService 캐시)
@@ -480,15 +482,16 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         tableView.setDraggingSourceOperationMask([.copy, .move], forLocal: false)
         tableView.setDraggingSourceOperationMask([.copy, .move], forLocal: true)
 
-        NotificationCenter.default.addObserver(forName: .settingsChanged, object: nil, queue: .main) {
+        // 옵저버 토큰은 보관 후 deinit에서 해제 — 페인(듀얼 페인 토글·창 닫기)마다 누적되던 누수 차단(2026-09-05 A12)
+        observers.append(NotificationCenter.default.addObserver(forName: .settingsChanged, object: nil, queue: .main) {
             [weak self] _ in self?.reloadActiveView()   // 날짜 포맷·확장자 표시 등 즉시 반영
-        }
+        })
         // 네트워크 브라우즈 중 발견 결과 증감 → 목록 재구성 (워게임 network_browse)
-        NotificationCenter.default.addObserver(forName: .networkHostsChanged, object: nil, queue: .main) {
+        observers.append(NotificationCenter.default.addObserver(forName: .networkHostsChanged, object: nil, queue: .main) {
             [weak self] _ in self?.reloadNetworkItems()
-        }
+        })
         // 볼륨 추출/언마운트(트리 ⏏·목록 메뉴·Finder 외부) 시 현재 폴더가 그 볼륨 하위면 홈으로 이탈 (제작자 지시 2026-07-25)
-        NSWorkspace.shared.notificationCenter.addObserver(
+        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didUnmountNotification, object: nil, queue: .main) { [weak self] note in
             guard let self,
                   let volume = note.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL else { return }
@@ -911,6 +914,31 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         browserClicked(browser)
     }
     func debugBrowserSelection() -> String { selectedBrowserURL()?.lastPathComponent ?? "nil" }
+    /// TF_COLUMNS — 컬럼 0의 첫 .sh 파일을 선택하고 더블클릭 경로(browserDoubleClicked → openSelected)를 구동.
+    /// .sh는 우측 터미널 탭에서 열려 외부 앱을 띄우지 않는다. 종전엔 openSelected가 컬럼 선택을 못 봐 무동작(A1).
+    func debugBrowserSelectFile() {
+        guard let root = directory else { return }
+        let children = browserChildURLs(of: root)
+        guard let idx = children.firstIndex(where: { !browserItem($0).isDirectory && $0.pathExtension == "sh" }) else { return }
+        browser.selectRow(idx, inColumn: 0)
+        browserDoubleClicked(browser)
+    }
+    /// TF_TRASH_MENU·TF_NETWORK_VIEW — 항목/배경 메뉴 구성을 실제 빌드 경로로 로그(휴지통 위생 A19·네트워크 가드 A10)
+    func debugItemMenuTitles() -> [String] {
+        guard let first = items.first else { return [] }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        if isNetworkBrowse { buildNetworkItemMenu(menu, item: first) } else { buildItemMenu(menu, item: first) }   // menuNeedsUpdate와 동일 분기
+        return menu.items.map { $0.isSeparatorItem ? "─" : "\($0.title)\($0.isEnabled ? "" : "(비활성)")" }
+    }
+    func debugBackgroundMenuTitles() -> [String] {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        buildBackgroundMenu(menu)
+        return menu.items.map { $0.isSeparatorItem ? "─" : "\($0.title)\($0.isEnabled ? "" : "(비활성)")" }
+    }
+    func debugSelectAll() { setActiveSelection(IndexSet(items.indices), scrollToFirst: false) }   // TF_COMPRESS
+    func debugCompress() { compressSelected(nil) }   // TF_COMPRESS — '-r' 이름이 zip 옵션으로 새지 않는지(A3)
     #endif
 
     // MARK: Quick Look 팝업 (스페이스바 — Finder 규약, 제작자 지시 2026-07-25)
@@ -1342,7 +1370,14 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     static let networkURL = URL(string: "treefinder://network")!
     var isNetworkBrowse: Bool { directory == Self.networkURL }
 
+    #if DEBUG
+    private(set) var debugShowCount = 0   // TF_TREE_CLICK — 트리 클릭 1회 = show 1회여야(A16 이중 발화 회귀)
+    #endif
+
     func show(directory: URL) {
+        #if DEBUG
+        debugShowCount += 1
+        #endif
         // 심링크 폴더는 여기서 **한 번** 대상으로 해석한다(Finder 규약 — decisions §32). 이 한 줄이
         // 목록 리스팅·FSEvents 감시 경로·크기 캐시 키·검색 스코프·탭 세션 저장까지 전부 실경로로 정렬한다
         // (self.directory 대입은 앱 통틀어 이 함수 하나뿐 = 단일 초크포인트).
@@ -1677,6 +1712,22 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         return activeSelectionIndexes().compactMap { items.indices.contains($0) ? items[$0].url : nil }
     }
 
+    /// 파일 조작 가능 여부 — 네트워크 브라우즈(가상 목록)에선 rename·휴지통·복제·압축·잘라내기가 가상 항목에 실행되어
+    /// "없는 파일" 오류 알림이 뜨던 것을 차단(전체 검토 2026-09-05 A10). 메뉴·도구모음 표시는 MainWindowController가 같은 값을 본다.
+    var fileOpsAllowed: Bool { directory?.isFileURL == true }
+
+    /// 생성·이름변경·붙여넣기·복제 가능 여부 — 휴지통 안에선 불가(PLAYBOOK §4.2 휴지통 위생, 2026-09-05 A19)
+    var canModifyHere: Bool { fileOpsAllowed && !isInTrash }
+
+    /// 현재 폴더가 휴지통(홈 ~/.Trash 또는 볼륨 .Trashes) 안인가 — 휴지통은 "그냥 특이한 폴더"가 아니라 동사 집합이 다르다.
+    var isInTrash: Bool {
+        guard let dir = directory, dir.isFileURL else { return false }
+        let path = dir.standardizedFileURL.path
+        if let trash = FileManager.default.urls(for: .trashDirectory, in: .userDomainMask).first?.standardizedFileURL.path,
+           path == trash || path.hasPrefix(trash + "/") { return true }
+        return path.contains("/.Trashes/")
+    }
+
     /// 목록 우클릭 "추출" — 선택된 착탈식 볼륨 전체 추출(Finder 규약, 제작자 확정 2026-07-25).
     /// 판정 = VolumeMonitor 메모리 조회, 추출 = VolumeEjector 오프메인 합류점(규칙 4).
     @objc func ejectSelectedVolumes(_ sender: Any?) {
@@ -1742,12 +1793,14 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     /// `fileExists`는 대상을 따라가므로 **깨진 심링크를 "없다"고 보고**한다: 그 이름으로 rename하면
     /// POSIX rename이 링크를 조용히 지우고 그 자리를 차지한다(실측 재현 — 링크 소실).
     /// 복사·이동 계열은 반대로 오류 516(이미 존재)으로 실패해 "충돌 회피 명명"이 무력화된다.
-    static func nameIsTaken(atPath path: String) -> Bool {
+    /// 아래 이름·경로 함수 5종은 순수 파일시스템 함수라 `nonisolated` — 진행률 엔진의 detached 클로저에서 호출되는데
+    /// @MainActor 클래스의 정적 멤버라 격리 경고 3건이 났고 Swift 6 전환 시 오류가 된다(전체 검토 2026-09-05 A7).
+    nonisolated static func nameIsTaken(atPath path: String) -> Bool {
         var info = stat()
         return lstat(path, &info) == 0
     }
 
-    static func availableURL(for proposed: URL) -> URL {
+    nonisolated static func availableURL(for proposed: URL) -> URL {
         guard nameIsTaken(atPath: proposed.path) else { return proposed }
         let parent = proposed.deletingLastPathComponent()
         let ext = proposed.pathExtension
@@ -1763,17 +1816,17 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     /// 사용자 표시 이름 → 디스크(POSIX) 이름: macOS 규약상 표시 '/'는 디스크에 콜론 ':'으로 저장(Finder 동일, 실측 확인).
     /// NFC 정규화도 함께. leaf 이름 전용(부모 경로엔 적용 금지). (제작자 지시 2026-07-23)
-    static func diskName(fromDisplay name: String) -> String {
+    nonisolated static func diskName(fromDisplay name: String) -> String {
         PathPasteboard.normalized(name).replacingOccurrences(of: "/", with: ":")
     }
 
     /// 디스크(POSIX) 이름 → 사용자 표시 이름: 콜론 ':'을 화면 '/'로 되돌린다(Finder 규약, 트리와 일치).
-    static func displayName(fromDisk name: String) -> String {
+    nonisolated static func displayName(fromDisk name: String) -> String {
         name.replacingOccurrences(of: ":", with: "/")
     }
 
     /// FileManager.moveItem은 대상 경로를 syscall 직전 NFD로 재정규화(함정 ③) — POSIX rename에 NFC 바이트 직접
-    static func posixRename(_ url: URL, toName newName: String) throws -> URL {
+    nonisolated static func posixRename(_ url: URL, toName newName: String) throws -> URL {
         let name = diskName(fromDisplay: newName)   // 표시 '/' → 디스크 ':' (제작자 지시 2026-07-23)
         let destPath = url.deletingLastPathComponent().path + "/" + name
         guard !nameIsTaken(atPath: destPath) else {   // 링크 미추종(깨진 심링크 조용한 덮어쓰기 방지)
@@ -1790,11 +1843,19 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         return URL(fileURLWithPath: destPath)
     }
 
+    /// 이동 실행 취소 — 파일 이동은 진행률 엔진(오프메인)으로. 종전엔 메인 스레드 동기 moveItem이라
+    /// 크로스 볼륨 undo(복사+삭제)가 UI를 얼렸다(전체 검토 2026-09-05 A13).
+    /// redo 등록은 undo 호출 안에서 동기적으로 해야 NSUndoManager가 redo 스택에 넣는다 — 그래서 이동 결과와 무관하게
+    /// 먼저 등록하고, 이동이 실패하면 엔진이 오류만 표면화한다(redo 시도 역시 실패를 표면화).
     private func registerUndoMove(current: URL, original: URL, action: String) {
         fileUndoManager.registerUndo(withTarget: self) { target in
-            let restored = (try? FileManager.default.moveItem(at: current, to: original)) != nil
-            target.reloadCurrentDirectory()
-            if restored { target.registerUndoMove(current: original, original: current, action: action) }
+            target.registerUndoMove(current: original, original: current, action: action)
+            let item = FileOperationEngine.Item(name: current.lastPathComponent) {
+                try FileManager.default.moveItem(at: current, to: original)
+                return nil
+            }
+            target.operationEngine.run(title: String(format: L("Undo %@"), action), items: [item],
+                                       in: target.view) { _ in target.reloadCurrentDirectory() }
         }
         fileUndoManager.setActionName(action)
     }
@@ -1815,7 +1876,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     @objc func copy(_ sender: Any?) {
         let urls = selectedURLs()
-        guard !urls.isEmpty else { return }
+        guard fileOpsAllowed, !urls.isEmpty else { return }   // 네트워크 호스트는 파일이 아님 (A10)
         if !cutSourceURLs.isEmpty {
             cutSourceURLs = []
             reloadActiveView()
@@ -1826,6 +1887,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     @objc func cut(_ sender: Any?) {
+        guard fileOpsAllowed else { return }   // 네트워크 브라우즈 가상 항목 (A10)
         copy(sender)
         cutSourceURLs = Set(selectedURLs())
         reloadActiveView()   // 잘라내기 흐림 반영 — 아이콘 셀 α0.45 동일 규약
@@ -1846,14 +1908,15 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     @objc func paste(_ sender: Any?) {
-        guard let directory, directory.isFileURL,
+        guard let directory, canModifyHere,   // 네트워크 브라우즈·휴지통 안은 붙여넣기 불가 (A10·A19)
               let urls = NSPasteboard.general.readObjects(
                   forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
               !urls.isEmpty else { return }
         // 다른 앱이 클립보드를 바꿨으면 cut 상태는 무효 — 복사로 강등 (워게임 §4)
         let isMove = !cutSourceURLs.isEmpty && cutSourceURLs == Set(urls)
+        let targetKey = Self.dropKey(directory)   // 같은 폴더 판정은 dropKey(§3 경로 비교 단일화) — URL == 금지
         let items = urls
-            .filter { !(isMove && $0.deletingLastPathComponent() == directory) }   // 같은 폴더 이동 = no-op
+            .filter { !(isMove && Self.dropKey($0.deletingLastPathComponent()) == targetKey) }   // 같은 폴더 이동 = no-op
             .map { transferItem(source: $0, into: directory, isMove: isMove) }
         operationEngine.run(title: isMove ? L("Moving items…") : L("Copying items…"),
                             items: items, in: view) { [weak self] _ in
@@ -1866,6 +1929,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     @objc func duplicateSelected(_ sender: Any?) {
+        guard canModifyHere else { return }   // 네트워크 브라우즈·휴지통 안 (A10·A19)
         let items = selectedURLs().map { url in
             FileOperationEngine.Item(name: url.lastPathComponent) { [weak self] in
                 let ext = url.pathExtension
@@ -1882,6 +1946,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     @objc func deleteSelected(_ sender: Any?) {
+        guard fileOpsAllowed else { return }   // 네트워크 브라우즈 가상 항목 (A10)
+        if isInTrash { deleteImmediately(); return }   // 휴지통 안 = "즉시 삭제…" + 확인 (PLAYBOOK §4.2, A19)
         let items = selectedURLs().map { url in
             FileOperationEngine.Item(name: url.lastPathComponent) { [weak self] in
                 var trashed: NSURL?
@@ -1893,6 +1959,33 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         }
         operationEngine.run(title: L("Moving to Trash…"), items: items, in: view) { [weak self] _ in
             self?.reloadCurrentDirectory()
+        }
+    }
+
+    /// 휴지통 안 항목의 영구 삭제 — 확인 시트 필수(기본 버튼 = 취소, 파괴 버튼은 기본값 아님 — HIG), undo 없음(복구 불가).
+    /// 휴지통 안에서 "휴지통으로 이동"은 무의미한 동사였다(PLAYBOOK 1부 §4.2 · P0-11, 2026-09-05 A19).
+    private func deleteImmediately() {
+        let urls = selectedURLs().filter(\.isFileURL)
+        guard !urls.isEmpty, let window = view.window else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = urls.count == 1
+            ? String(format: L("Are you sure you want to delete “%@”?"), urls[0].lastPathComponent)
+            : String(format: L("Are you sure you want to delete the %d selected items?"), urls.count)
+        alert.informativeText = L("The selected items will be deleted immediately. You can’t undo this action.")
+        alert.addButton(withTitle: L("Cancel"))
+        alert.addButton(withTitle: L("Delete")).hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertSecondButtonReturn else { return }
+            let items = urls.map { url in
+                FileOperationEngine.Item(name: url.lastPathComponent) {
+                    try FileManager.default.removeItem(at: url)
+                    return nil
+                }
+            }
+            self.operationEngine.run(title: L("Deleting items…"), items: items, in: self.view) { [weak self] _ in
+                self?.reloadCurrentDirectory()
+            }
         }
     }
 
@@ -1926,7 +2019,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     /// 선택 항목 압축 — Finder "압축"처럼 현재 폴더에 zip 생성 (2026-07-16 제작자 지시)
     /// 단일 = "이름.zip", 다중 = "아카이브.zip" — 충돌 시 "이름 2" 규약, 덮어쓰기 없음
     @objc func compressSelected(_ sender: Any?) {
-        guard let directory else { return }
+        guard let directory, canModifyHere else { return }   // 네트워크 브라우즈·휴지통 안 (A10·A19)
         let urls = selectedURLs()
         guard !urls.isEmpty else { return }
         let baseName = urls.count == 1 ? urls[0].lastPathComponent + ".zip" : L("Archive") + ".zip"
@@ -1935,13 +2028,17 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         let item = FileOperationEngine.Item(name: dest.lastPathComponent) { [weak self] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
-            process.arguments = ["-r", "-y", "-q", dest.path] + names   // -y = 심볼릭 링크 보존
+            // 이름을 './'로 접두 — '-r'·'--help' 같은 이름이 zip 옵션으로 해석돼 사용법만 찍고 exit 0을 돌려주는
+            // 함정 실측(전체 검토 2026-09-05 A3). -y = 심볼릭 링크 보존.
+            process.arguments = ["-r", "-y", "-q", dest.path] + names.map { "./" + $0 }
             process.currentDirectoryURL = directory   // 상대 경로로 담아 아카이브 내부 경로를 깨끗하게
-            process.standardOutput = Pipe()
-            process.standardError = Pipe()
+            // 읽지 않는 파이프는 64KB에서 자식이 블록돼 waitUntilExit가 영구 대기(취소 불가) — 출력은 버린다(A4, ArchiveListing 규약)
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
             try process.run()
             process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
+            // exit 0이어도 아카이브가 없으면 실패 — zip의 사용법 출력 경로가 exit 0이라 종료 코드만으론 부족(실측)
+            guard process.terminationStatus == 0, FileManager.default.fileExists(atPath: dest.path) else {
                 try? FileManager.default.removeItem(at: dest)   // 실패 잔해 정리
                 throw NSError(domain: "TreeFinder", code: Int(process.terminationStatus),
                               userInfo: [NSLocalizedDescriptionKey: L("Couldn't compress the selected items.")])
@@ -1954,7 +2051,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     @objc func newFolder(_ sender: Any?) {
-        guard let directory, directory.isFileURL else { return }
+        guard let directory, canModifyHere else { return }   // 휴지통 안 생성 금지 (A19)
         do {
             let dest = Self.availableURL(for: directory.appendingPathComponent("untitled folder"))
             try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: false)
@@ -1965,7 +2062,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     @objc func renameSelected(_ sender: Any?) {
-        guard searchResults == nil else { return }   // 검색 결과 중 rename 비활성 (제작자 지시 2026-07-23)
+        // 검색 결과 중 rename 비활성 (제작자 지시 2026-07-23) · 네트워크 호스트·휴지통 안 rename 불가 (A10·A19)
+        guard searchResults == nil, canModifyHere else { return }
         if viewStyle == .list {
             let row = tableView.selectedRow
             // makeIfNecessary: true — 방금 스크롤해 보이게 만든 행이라도 셀 뷰 생성은 다음 화면 갱신
@@ -2086,7 +2184,14 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     /// ⌘O — 선택 항목 열기 (더블클릭과 동일: 단일 폴더 = 이동, 파일 = 실행)
     func openSelected() {
-        let selected = activeSelectionIndexes().compactMap { items.indices.contains($0) ? items[$0] : nil }
+        // 컬럼 뷰의 선택은 브라우저가 관리해 items 인덱스와 무관 — selectedURLs()(컬럼 인지)로 항목을 구한다.
+        // 종전엔 activeSelectionIndexes()가 컬럼에서 항상 빈 집합이라 파일 더블클릭·⌘O가 무동작이었다(전체 검토 2026-09-05 A1).
+        let selected = viewStyle == .columns
+            ? selectedURLs().map { browserItem($0) }
+            : activeSelectionIndexes().compactMap { items.indices.contains($0) ? items[$0] : nil }
+        #if DEBUG
+        NSLog("TF_OPEN_SELECTED style=%@ items=[%@]", viewStyle.rawValue, selected.map(\.name).joined(separator: ", "))
+        #endif
         // 네트워크 컴퓨터 = 연결로 인터셉트 — NSWorkspace.open은 Finder가 마운트 UI를 탈취 (워게임 network_browse)
         if let network = selected.first(where: { !$0.url.isFileURL }) {
             connectToNetworkComputer(network)
@@ -2212,6 +2317,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             FSEventStreamInvalidate(stream)
             FSEventStreamRelease(stream)
         }
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        if let workspaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver) }
     }
 
     func notifyStatus() {   // 듀얼 페인 활성 전환 시 상태바 재발행에도 사용
@@ -2236,13 +2343,13 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     /// 선택 항목의 경로를 클립보드로 — PathPasteboard 경유(NFC 보정, decisions.md §5)
     @objc func copyPath(_ sender: Any?) {
-        let rows = activeSelectionIndexes()
+        let selected = selectedURLs().filter(\.isFileURL)   // 컬럼 뷰 선택 인지 — 종전엔 컬럼에서 현재 폴더 경로가 복사됐다(2026-09-05 A9)
         let paths: [String]
-        if rows.isEmpty {
-            guard let directory else { return }
+        if selected.isEmpty {
+            guard let directory, directory.isFileURL else { return }
             paths = [directory.path]   // 선택이 없으면 현재 폴더 경로
         } else {
-            paths = rows.compactMap { items.indices.contains($0) ? items[$0].url.path : nil }
+            paths = selected.map(\.path)
         }
         PathPasteboard.copy(paths.joined(separator: "\n"))
     }
@@ -2275,11 +2382,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 setActiveSelection(IndexSet(integer: row), scrollToFirst: false)
                 if viewStyle != .list { selectionDidSync() }
             }
-            let connect = NSMenuItem(title: L("Connect"), action: #selector(connectClicked(_:)), keyEquivalent: "")
-            connect.target = self
-            connect.representedObject = items[row].name
-            connect.image = NSImage(systemSymbolName: "bolt.horizontal", accessibilityDescription: L("Connect"))
-            menu.addItem(connect)
+            buildNetworkItemMenu(menu, item: items[row])
             return
         }
         let item: FileItem
@@ -2298,7 +2401,22 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             }
             item = items[row]
         }
+        buildItemMenu(menu, item: item)
+    }
+
+    /// 네트워크 컴퓨터 항목 메뉴 = "연결" 하나 (menuNeedsUpdate와 검증 훅 공용)
+    private func buildNetworkItemMenu(_ menu: NSMenu, item: FileItem) {
+        let connect = NSMenuItem(title: L("Connect"), action: #selector(connectClicked(_:)), keyEquivalent: "")
+        connect.target = self
+        connect.representedObject = item.name
+        connect.image = NSImage(systemSymbolName: "bolt.horizontal", accessibilityDescription: L("Connect"))
+        menu.addItem(connect)
+    }
+
+    /// 항목 우클릭 메뉴 구성 — 단일 소스(검증 훅도 같은 경로를 탐, 트리의 buildMenu와 같은 규약)
+    private func buildItemMenu(_ menu: NSMenu, item: FileItem) {
         let url = item.url
+        let inTrash = isInTrash   // 휴지통 위생(PLAYBOOK §4.2): 붙여넣기·복제·이름변경·즐겨찾기 비활성, 삭제는 "즉시 삭제…" (2026-09-05 A19)
 
         func entry(_ title: String, _ symbol: String, _ action: Selector?, enabled: Bool = true) -> NSMenuItem {
             let mi = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -2335,20 +2453,24 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         menu.addItem(entry(L("Copy"), "doc.on.doc", #selector(copy(_:))))
         let canPaste = NSPasteboard.general.canReadObject(
             forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
-        menu.addItem(entry(L("Paste"), "doc.on.clipboard", #selector(paste(_:)), enabled: canPaste))
-        menu.addItem(entry(L("Duplicate"), "square.filled.on.square", #selector(duplicateSelected(_:))))
-        menu.addItem(entry(L("Compress"), "doc.zipper", #selector(compressSelected(_:))))
+        menu.addItem(entry(L("Paste"), "doc.on.clipboard", #selector(paste(_:)), enabled: canPaste && !inTrash))
+        menu.addItem(entry(L("Duplicate"), "square.filled.on.square", #selector(duplicateSelected(_:)), enabled: !inTrash))
+        menu.addItem(entry(L("Compress"), "doc.zipper", #selector(compressSelected(_:)), enabled: !inTrash))
         menu.addItem(.separator())
-        // 인라인 rename = 리스트 + 아이콘(갤러리는 라벨 없어 제외) (제작자 지시 2026-07-25)
+        // 인라인 rename = 리스트 + 아이콘(갤러리는 라벨 없어 제외) (제작자 지시 2026-07-25). 안전한 동사(이름변경)가 파괴 동사 위 (PLAYBOOK §4.2)
         menu.addItem(entry(L("Rename"), "character.cursor.ibeam", #selector(renameSelected(_:)),
-                           enabled: viewStyle == .list || viewStyle == .icons))
-        menu.addItem(entry(L("Move to Trash"), "trash", #selector(deleteSelected(_:))))
+                           enabled: (viewStyle == .list || viewStyle == .icons) && !inTrash))
+        if inTrash {
+            menu.addItem(entry(L("Delete Immediately…"), "trash.slash", #selector(deleteSelected(_:))))
+        } else {
+            menu.addItem(entry(L("Move to Trash"), "trash", #selector(deleteSelected(_:))))
+        }
         if RestoreRecords.original(for: url) != nil {   // TreeFinder가 지운 휴지통 항목만 (decisions §14)
             menu.addItem(entry(L("Restore"), "arrow.uturn.backward", #selector(restoreSelected(_:))))
         }
         menu.addItem(.separator())
         menu.addItem(entry(L("Add to Favorites"), "pin",
-                           #selector(addToFavoritesClicked(_:)), enabled: item.isDirectory))
+                           #selector(addToFavoritesClicked(_:)), enabled: item.isDirectory && !inTrash))
         menu.addItem(entry(L("Share"), "square.and.arrow.up", #selector(shareClicked(_:))))
         menu.addItem(entry(L("Copy Path"), "link", #selector(copyPath(_:))))
         menu.addItem(.separator())
@@ -2375,11 +2497,12 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             mi.isEnabled = enabled
             return mi
         }
-        menu.addItem(entry(L("New Folder"), "folder.badge.plus", #selector(newFolder(_:))))
-        menu.addItem(entry(L("New Text Document"), "doc.badge.plus", #selector(newTextDocument(_:))))
+        let modifiable = canModifyHere   // 휴지통 안 = 생성·붙여넣기 비활성 (PLAYBOOK §4.2, 2026-09-05 A19)
+        menu.addItem(entry(L("New Folder"), "folder.badge.plus", #selector(newFolder(_:)), enabled: modifiable))
+        menu.addItem(entry(L("New Text Document"), "doc.badge.plus", #selector(newTextDocument(_:)), enabled: modifiable))
         let canPaste = NSPasteboard.general.canReadObject(
             forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
-        menu.addItem(entry(L("Paste"), "doc.on.clipboard", #selector(paste(_:)), enabled: canPaste))
+        menu.addItem(entry(L("Paste"), "doc.on.clipboard", #selector(paste(_:)), enabled: canPaste && modifiable))
         menu.addItem(.separator())
         menu.addItem(entry(L("Open in New Tab"), "plus.square.on.square", #selector(openCurrentInNewTab(_:))))
         menu.addItem(entry(L("Open in Terminal"), "terminal", #selector(openCurrentInTerminal(_:))))
@@ -2470,7 +2593,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     /// Windows Explorer의 "New ▸ Text Document" (원본 1.5.6 — undo는 파일이 빈 동안만 제거)
     @objc func newTextDocument(_ sender: Any?) {
-        guard let directory, directory.isFileURL else { return }
+        guard let directory, canModifyHere else { return }   // 휴지통 안 생성 금지 (A19)
         let dest = Self.availableURL(for: directory.appendingPathComponent("untitled.txt"))
         // createFile은 실패를 Bool로만 알린다 — 삼키면 "눌러도 아무 일도 안 일어나는" 조용한 실패가 된다
         guard FileManager.default.createFile(atPath: dest.path, contents: Data()) else {
@@ -2519,9 +2642,13 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     @objc private func noop() {}   // Open With 부모 항목 활성화용
 
+    /// 우클릭 "열기" = 더블클릭과 같은 경로 — 폴더는 앱 안에서 진입, 파일은 openFile(별칭·.sh 규약).
+    /// 종전 NSWorkspace.open은 폴더를 Finder로 튕겼다(전체 검토 2026-09-05 A8).
     @objc private func openClicked(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL else { return }
-        NSWorkspace.shared.open(url)
+        guard let url = sender.representedObject as? URL, url.isFileURL else { return }
+        let item = viewStyle == .columns ? browserItem(url)
+            : (items.first { $0.url == url } ?? DirectoryLister.item(for: url))
+        if item.isDirectory { show(directory: url) } else { openFile(url) }
     }
 
     @objc private func openWithApp(_ sender: NSMenuItem) {
@@ -2574,14 +2701,21 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     private var sharingPicker: NSSharingServicePicker?
     @objc private func shareClicked(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL else { return }
-        guard let index = activeSelectionIndexes().first else { return }
+        guard let url = sender.representedObject as? URL, url.isFileURL else { return }
         let picker = NSSharingServicePicker(items: [url])
         sharingPicker = picker
-        // 앵커는 활성 뷰 기준 — 숨은 테이블 rect에 띄우면 위치가 엉킴 (QC 위원)
-        if viewStyle == .list {
+        // 앵커는 활성 뷰 기준 — 숨은 테이블 rect에 띄우면 위치가 엉킴 (QC 위원). 컬럼 뷰는 브라우저 셀이 앵커 (2026-09-05 A9)
+        switch viewStyle {
+        case .columns:
+            let column = browser.selectedColumn
+            let row = column >= 0 ? browser.selectedRow(inColumn: column) : -1
+            let rect = row >= 0 ? browser.frame(ofRow: row, inColumn: column) : browser.bounds
+            picker.show(relativeTo: rect, of: browser, preferredEdge: .minY)
+        case .list:
+            guard let index = activeSelectionIndexes().first else { return }
             picker.show(relativeTo: tableView.rect(ofRow: index), of: tableView, preferredEdge: .minY)
-        } else {
+        case .icons, .gallery:
+            guard let index = activeSelectionIndexes().first else { return }
             picker.show(relativeTo: collectionView.frameForItem(at: index),
                         of: collectionView, preferredEdge: .minY)
         }
