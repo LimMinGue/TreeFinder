@@ -160,6 +160,22 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
             menuItem.state = (current == menuItem.representedObject as? String) ? .on : .off
         case #selector(restoreSelected(_:)):
             return listController?.canRestoreSelection ?? false   // 기록 있는 선택에서만 활성
+        case #selector(emptyTrash(_:)):
+            return listController?.canEmptyTrash ?? false   // 휴지통이 비어 있으면 비활성 (Finder 동일)
+        // Terminal 메뉴 = 터미널 포커스에서만 활성 (decisions §36)
+        case #selector(newTerminalTab(_:)), #selector(closeTerminalTab(_:)), #selector(clearTerminalBuffer(_:)),
+             #selector(findNext(_:)), #selector(findPrevious(_:)),
+             #selector(terminalBiggerText(_:)), #selector(terminalSmallerText(_:)):
+            return terminalFocused
+        case #selector(toggleTerminalFollow(_:)):
+            menuItem.state = UserDefaults.standard.bool(forKey: SettingsKeys.terminalFollowsCwd) ? .on : .off
+        case #selector(pasteSelectionIntoTerminal(_:)), #selector(duplicateSelected(_:)):
+            return (listController?.fileOpsAllowed ?? false) && (listController?.hasFileSelection ?? false)
+        case #selector(newFolderWithSelection(_:)):
+            return (listController?.canModifyHere ?? false) && (listController?.hasFileSelection ?? false)
+        case #selector(goToStandardFolder(_:)):
+            guard let url = menuItem.representedObject as? URL else { return false }
+            return !url.isFileURL || FileManager.default.fileExists(atPath: url.path)   // iCloud Drive 미사용 기기 등
         case #selector(toggleExpandToOpenFolder(_:)):
             let on = UserDefaults.standard.object(forKey: SettingsKeys.expandToOpenFolder) as? Bool ?? true
             menuItem.state = on ? .on : .off
@@ -217,16 +233,57 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
     @objc func deleteSelected(_ sender: Any?) { listController?.deleteSelected(sender) }
     @objc func newTextDocument(_ sender: Any?) { listController?.newTextDocument(sender) }
     @objc func restoreSelected(_ sender: Any?) { listController?.restoreSelected(sender) }
+    @objc func emptyTrash(_ sender: Any?) { listController?.emptyTrash(sender) }   // File 메뉴·사이드바(응답 체인)
     @objc func openSelected(_ sender: Any?) { listController?.openSelected() }
     @objc func renameSelected(_ sender: Any?) { listController?.renameSelected(sender) }
     @objc func getInfoSelected(_ sender: Any?) { listController?.getInfoSelected(sender) }
     @objc func closeTab(_ sender: Any?) {
+        if terminalFocused && invokedByKey { previewController?.closeActiveTerminalTab(); return }   // 터미널 포커스 ⌘W = 터미널 탭 닫기
         // 마지막 탭이면 창을 닫는다 (원본 ⌘W = Close Tab 규약)
         if listController?.closeActiveTab() == false { window?.performClose(sender) }
     }
     @objc func focusSearch(_ sender: Any?) {
+        if terminalFocused { previewController?.terminalFind(.showFindInterface); return }   // 터미널 = 스크롤백 찾기 바 (iTerm2 ⌘F)
         guard let field = searchItem?.searchField else { return }
         window?.makeFirstResponder(field)
+    }
+
+    // MARK: Terminal 메뉴·터미널 포커스 단축키 (iTerm2 규약 — 위원회 2026-09-11 decisions §36)
+    // ⌘T/⌘W/⌘K/⇧⌘G는 파일 탭·서버 연결·폴더로 이동과 같은 키. AppKit은 메뉴바의 중복 키를 나중 항목에서 지워 버리므로(실측)
+    // "한쪽만 활성" 설계는 불가 → 기존 항목의 액션이 **키로 호출됐고 터미널이 포커스일 때만** 터미널 동작으로 분기한다.
+    // 메뉴를 마우스로 고르면(currentEvent ≠ keyDown) 제목 그대로의 동작 — 제목과 동작이 어긋나지 않게(디자이너).
+    private var terminalFocused: Bool { window?.firstResponder is DropTerminalView }
+    private var invokedByKey: Bool { NSApp.currentEvent?.type == .keyDown }
+    @objc func newTerminalTab(_ sender: Any?) { previewController?.newTerminalTabFromMenu() }
+    @objc func closeTerminalTab(_ sender: Any?) { previewController?.closeActiveTerminalTab() }
+    @objc func clearTerminalBuffer(_ sender: Any?) { previewController?.clearActiveTerminalBuffer() }
+    @objc func findNext(_ sender: Any?) { previewController?.terminalFind(.nextMatch) }
+    @objc func findPrevious(_ sender: Any?) { previewController?.terminalFind(.previousMatch) }
+    @objc func terminalBiggerText(_ sender: Any?) { previewController?.adjustTerminalFontSize(by: 1) }
+    @objc func terminalSmallerText(_ sender: Any?) { previewController?.adjustTerminalFontSize(by: -1) }
+    @objc func toggleTerminalFollow(_ sender: Any?) {
+        let defaults = UserDefaults.standard
+        defaults.set(!defaults.bool(forKey: SettingsKeys.terminalFollowsCwd), forKey: SettingsKeys.terminalFollowsCwd)
+    }
+    /// 선택 항목 → 터미널 인자 (킬러 C3) — 패널이 접혀 있으면 펴고 터미널 탭으로
+    @objc func pasteSelectionIntoTerminal(_ sender: Any?) { listController?.pasteSelectionIntoTerminal(sender) }
+    @objc func duplicateSelected(_ sender: Any?) { listController?.duplicateSelected(sender) }
+    @objc func newFolderWithSelection(_ sender: Any?) { listController?.newFolderWithSelection(sender) }
+    /// File ▸ 새 윈도우(⌘N) — 현재 폴더에서 (Finder 규약)
+    @objc func newWindow(_ sender: Any?) {
+        let current = listController?.directory.flatMap { $0.isFileURL ? $0 : nil }
+        MainWindowController.openNewWindow(directory: current ?? FileManager.default.homeDirectoryForCurrentUser)
+    }
+    /// Go ▸ 표준 폴더(홈·데스크탑·문서·다운로드·응용 프로그램·유틸리티·컴퓨터·iCloud Drive·네트워크) — Finder 단축키 패리티
+    @objc func goToStandardFolder(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        listController?.show(directory: url)
+    }
+    /// 검색 범위(돋보기 메뉴) — 이 폴더 / 이 Mac
+    @objc func searchScopeChanged(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(sender.tag == 1, forKey: SettingsKeys.searchThisMac)
+        searchItem?.searchField.searchMenuTemplate?.items.forEach { $0.state = $0.tag == sender.tag ? .on : .off }
+        listController?.searchScopeDidChange()
     }
     @objc func showNextTab(_ sender: Any?) { listController?.selectNextTab() }
     @objc func showPreviousTab(_ sender: Any?) { listController?.selectPreviousTab() }
@@ -252,6 +309,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
     // MARK: Finder 규약 — ⇧⌘G 폴더로 이동 / ⌘K 서버에 연결 (제작자 지시 2026-07-16)
 
     @objc func goToFolder(_ sender: Any?) {
+        if terminalFocused && invokedByKey { previewController?.terminalFind(.previousMatch); return }   // 터미널 포커스 ⇧⌘G = 이전 찾기
         promptForText(message: L("Go to the folder:"), placeholder: "~/Documents",
                       initial: listController?.directory?.path ?? "", ok: L("Go")) {
             [weak self] input in
@@ -274,6 +332,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
     }
 
     @objc func connectToServer(_ sender: Any?) {
+        if terminalFocused && invokedByKey { previewController?.clearActiveTerminalBuffer(); return }   // 터미널 포커스 ⌘K = 버퍼 지우기
         promptForText(message: L("Connect to Server"), placeholder: "smb://server/share", ok: L("Connect")) {
             [weak self] input in
             guard let self, let input else { return }
@@ -548,6 +607,29 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { post(.leftMouseUp) }
     }
     func debugUndo() { listController?.undo(nil) }   // TF_UNDO_MOVE (A13)
+    // TF_R1_* — 1라운드 검증 릴레이 (decisions §36)
+    func debugPerformDrops(_ sources: [URL], into target: URL) { listController?.debugPerformDrop(sources, into: target) }
+    func debugRevealFile(_ url: URL) { listController?.reveal(fileURL: url) }
+    func debugMenuEnabled(_ selectorName: String) -> Bool {
+        validateMenuItem(NSMenuItem(title: "", action: NSSelectorFromString(selectorName), keyEquivalent: ""))
+    }
+    func debugOpenWithTitles() -> [String] { listController?.debugOpenWithTitles() ?? [] }
+    func debugSearchScopeTitles() -> [String] {
+        searchItem?.searchField.searchMenuTemplate?.items.map { "\($0.title)\($0.state == .on ? "✓" : "")" } ?? []
+    }
+    func debugSetSearchThisMac(_ on: Bool) {
+        let item = NSMenuItem(); item.tag = on ? 1 : 0
+        searchScopeChanged(item)
+    }
+    func debugShowTerminal() { previewController?.debugShowTerminal() }
+    func debugTerminalInfo() -> String { previewController?.debugTerminalInfo() ?? "nil" }
+    func debugTerminalOpenLink(_ link: String) { previewController?.debugTerminalOpenLink(link) }
+    func debugTerminalType(_ text: String) { previewController?.debugTerminalKeySim(text) }
+    func debugActiveTerminalCwd() -> String { previewController?.debugActiveTerminalCwd() ?? "nil" }
+    func debugRestoreTerminals(_ entries: [[String: String]]) { previewController?.restoreTerminalSessions(entries) }
+    var debugTreeRefreshCount = 0
+    func debugCopyDocumentText() { listController?.debugCopyDocumentText() }   // TF_HWP_EXPORT
+    func debugExportPDF() { listController?.debugExportPDF() }
     func debugMarkdownDiscardTest(other: URL) {   // TF_MD_DISCARD (A2)
         previewController?.debugMarkdownDiscardTest(other: other)
     }
@@ -555,6 +637,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
 
     /// File ▸ New Tab(⌘T) — 커스텀 탭 스트립(파일 목록 영역 스코프)에 새 탭 (decisions §10)
     override func newWindowForTab(_ sender: Any?) {
+        if terminalFocused && invokedByKey { previewController?.newTerminalTabFromMenu(); return }   // 터미널 포커스 ⌘T = 새 터미널 탭
         listController?.addTab()
     }
 
@@ -567,6 +650,10 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
             self.activate(pane: list)
         }
         list.onAddFavorite = { [weak self] url in self?.treeController?.addFavorite(url: url) }
+        list.onPastePathsToTerminal = { [weak self] urls in
+            self?.splitController?.splitViewItems.last?.isCollapsed = false
+            self?.previewController?.pastePathsIntoTerminal(urls)
+        }
         // .sh 더블클릭 = 우측 패널의 새 터미널 탭에서 실행 — 패널이 접혀 있으면 먼저 편다
         list.onRunScript = { [weak self] url in
             self?.splitController?.splitViewItems.last?.isCollapsed = false
@@ -731,6 +818,15 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
         window.contentViewController = content
         treeController = tree
         previewController = preview
+        // 터미널 → 목록 통합 (decisions §36): 경로 ⌘클릭 = 목록에서 선택 / 셸 cd 따라가기 / 명령 뒤 트리 갱신
+        preview.onRevealPath = { [weak self] url in self?.listController?.reveal(fileURL: url) }
+        preview.onFollowDirectory = { [weak self] url in self?.listController?.followShellDirectory(url) }
+        preview.onTerminalCommand = { [weak self] in
+            self?.treeController?.refreshTree()
+            #if DEBUG
+            self?.debugTreeRefreshCount += 1
+            #endif
+        }
         contentController = content
         splitController = split
         panes = [list]
@@ -765,6 +861,10 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
     func restoreLastSession() {
         listController?.persistsSession = true   // 첫(주) 페인만 저장 주체
         let defaults = UserDefaults.standard
+        previewController?.persistsTerminals = true   // 터미널 탭(폴더·이름)도 같은 규약으로 (decisions §36)
+        if let terminals = defaults.array(forKey: SettingsKeys.lastTerminals) as? [[String: String]], !terminals.isEmpty {
+            previewController?.restoreTerminalSessions(terminals)
+        }
         guard let paths = defaults.stringArray(forKey: SettingsKeys.lastTabs), !paths.isEmpty else { return }
         listController?.restoreSession(tabPaths: paths,
                                        active: defaults.integer(forKey: SettingsKeys.lastActiveTab))
@@ -841,6 +941,16 @@ extension MainWindowController: NSToolbarDelegate {
             item.searchField.target = self
             item.searchField.action = #selector(searchChanged(_:))
             (item.searchField.cell as? NSSearchFieldCell)?.sendsSearchStringImmediately = true
+            let scopeMenu = NSMenu()   // 검색 범위 = 돋보기 메뉴 (Finder "이 Mac" 패리티, 새 컨트롤 없이 — 디자이너)
+            let thisMac = UserDefaults.standard.bool(forKey: SettingsKeys.searchThisMac)
+            for (title, tag) in [(L("This Folder"), 0), (L("This Mac"), 1)] {
+                let mi = NSMenuItem(title: title, action: #selector(searchScopeChanged(_:)), keyEquivalent: "")
+                mi.target = self
+                mi.tag = tag
+                mi.state = (thisMac ? 1 : 0) == tag ? .on : .off
+                scopeMenu.addItem(mi)
+            }
+            item.searchField.searchMenuTemplate = scopeMenu
             searchItem = item
             return item
         default: return nil

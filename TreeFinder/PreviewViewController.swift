@@ -13,8 +13,35 @@ final class DropTerminalView: LocalProcessTerminalView {
     var onCommandSubmit: ((String) -> Void)?
     /// 이 터미널이 포커스일 때의 키 입력 — Broadcast input 중계용 (제작자 지시 2026-07-21)
     var onKeyInput: ((NSEvent) -> Void)?
+    /// 출력 속 파일 경로 ⌘클릭 → 목록에서 선택·미리보기 (킬러 C1, 위원회 2026-09-11 decisions §36)
+    var onRevealPath: ((URL) -> Void)?
     private var inputLine = ""
     private var keyMonitor: Any?
+
+    /// SwiftTerm은 경로 패턴을 감지해 ⌘호버 밑줄까지 치지만 열기는 URL 스킴 기준이라 스킴 없는 경로는 무동작이었다(B§A7).
+    /// 로컬 경로면 목록으로, 그 외(http·mailto·OSC 8)는 라이브러리 기본(NSWorkspace.open).
+    override func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
+        if let url = Self.localFileURL(fromLink: link, cwd: cwdPath ?? spawnDirectory?.path) {
+            onRevealPath?(url)
+        } else {
+            super.requestOpenLink(source: source, link: link, params: params)
+        }
+    }
+
+    /// 스킴 없는 경로만 로컬 파일로 — `파일:줄[:열]` 접미 제거, `~` 확장, 상대 경로는 셸 cwd(OSC 7) 기준. 없으면 nil(링크 기본 처리).
+    nonisolated static func localFileURL(fromLink link: String, cwd: String?) -> URL? {
+        guard !link.contains("://"), !link.hasPrefix("mailto:") else { return nil }
+        var path = link
+        while let range = path.range(of: #":\d+$"#, options: .regularExpression) { path.removeSubrange(range) }
+        path = (path as NSString).expandingTildeInPath
+        if !path.hasPrefix("/") {
+            guard let cwd else { return nil }
+            path = ((cwd as NSString).expandingTildeInPath as NSString).appendingPathComponent(path)
+        }
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return nil }
+        return URL(fileURLWithPath: path)
+    }
 
     // 탭 제목 소스 — 우선순위: 사용자 지정 > 원격 접속 정보 > 현재 경로 > OSC 제목 > 마지막 명령 > "터미널 N"
     // (원격은 서버 정보, 로컬은 경로 — 제작자 지시 2026-07-21. 수동 이름은 세션 한정 휘발)
@@ -175,6 +202,14 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
                                   NSTableViewDataSource, NSTableViewDelegate {
     /// 수동 동기화 버튼이 cd할 대상 — 폴더 이동 시 MainWindowController가 갱신
     var currentDirectory: URL?
+    /// 터미널 → 창 컨트롤러 통지 (위원회 2026-09-11 decisions §36): 경로 ⌘클릭 / 셸 cd 따라가기 / 명령 뒤 트리 갱신
+    var onRevealPath: ((URL) -> Void)?
+    var onFollowDirectory: ((URL) -> Void)?
+    var onTerminalCommand: (() -> Void)?
+    /// 터미널 탭 영속(폴더·이름만) — 주 창만 켠다(파일 탭의 persistsSession과 동일 규약). TF_ 검증 실행에선 꺼짐.
+    var persistsTerminals = false
+    private var pendingTerminalRestore: [[String: String]] = []
+    private var treeRefreshWork: DispatchWorkItem?
 
     /// 갤러리 뷰 중복 방지 — 대형 프리뷰는 숨기고 정보 테이블을 상단으로 (워게임 icon_gallery §4, 디자이너 위원)
     var infoOnlyMode = false {
@@ -965,7 +1000,18 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         }
         // 최초 열기(마지막 탭 닫고 재열기 포함) = 보고 있는 폴더에서 시작 (제작자 지시 2026-07-23).
         // + 새 탭은 홈 유지(2026-07-21 지시) — 확장은 제작자 판단 대기.
-        terminalSessions = [makeTerminalSession(startingAt: currentDirectory)]
+        if !pendingTerminalRestore.isEmpty {   // 마지막 세션의 터미널 탭 복원 — 폴더·이름만, 내용은 범위 밖 (decisions §36)
+            terminalSessions = pendingTerminalRestore.map { entry in
+                let cwd = entry["cwd"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
+                let session = makeTerminalSession(startingAt: cwd)
+                session.cwdPath = cwd.map { ($0.path as NSString).abbreviatingWithTildeInPath }
+                if let title = entry["title"], !title.isEmpty { session.userTitle = title }
+                return session
+            }
+            pendingTerminalRestore = []
+        } else {
+            terminalSessions = [makeTerminalSession(startingAt: currentDirectory)]
+        }
         activeTerminalIndex = 0
         mountTerminal(terminalSessions[0])
         refreshTerminalTabBar()
@@ -992,10 +1038,13 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             if let target = DropTerminalView.remoteTarget(inCommandLine: line) { terminal?.remoteTarget = target }
             self?.updateTerminalHelp(for: line)
             self?.refreshTerminalTabBar()
+            self?.scheduleTreeRefreshAfterCommand()   // 셸이 바꾼 폴더 구조를 트리에 (C§2-8 구멍, decisions §36)
         }
         terminal.onKeyInput = { [weak self, weak terminal] event in
             self?.broadcast(event, from: terminal)
         }
+        terminal.onRevealPath = { [weak self] url in self?.onRevealPath?(url) }
+        terminal.changeScrollback(Self.scrollbackLines)   // 기본 500줄(SwiftTerm)은 빌드 로그 한 번에 넘친다 (B§A2)
         terminal.processDelegate = self   // OSC 제목·OSC7 경로 → 탭 제목 자동화
         terminal.translatesAutoresizingMaskIntoConstraints = false
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -1019,7 +1068,12 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             startPath = FileManager.default.homeDirectoryForCurrentUser.path
         }
         terminal.spawnDirectory = startDirectory   // Restart Shell 제자리 재시작용(재검증은 재시작 시점에)
-        terminal.startProcess(executable: shell, execName: "-\(shellName)",
+        // TERM_PROGRAM=Apple_Terminal: /etc/zshrc·bashrc가 `/etc/*rc_Apple_Terminal`을 읽어 프롬프트마다 OSC 7(cwd)을 보낸다 —
+        // 탭 제목·셸 cd 따라가기의 전제(실측: SwiftTerm은 TERM_PROGRAM을 안 넘겨 기본 zsh는 OSC 7을 전혀 안 보냈다, decisions §36).
+        // 세션 저장(~/.zsh_sessions)은 TERM_SESSION_ID 부재로 자동 비활성.
+        let environment = Terminal.getEnvironmentVariables(termName: "xterm-256color", trueColor: true)
+            + ["TERM_PROGRAM=Apple_Terminal"]
+        terminal.startProcess(executable: shell, environment: environment, execName: "-\(shellName)",
                               currentDirectory: startPath)
         terminal.menu = buildTerminalMenu(for: terminal)
         applyTerminalFont(to: terminal)
@@ -1150,6 +1204,12 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
                 (icon, session.tabTitle(fallback: String(format: L("Terminal %d"), index + 1)))
             },
             active: activeTerminalIndex)
+        guard persistsTerminals else { return }
+        // 탭 변동의 단일 초크포인트 — 여기서 세션 저장(파일 탭의 refreshTabBar와 같은 규약). 폴더·이름만.
+        UserDefaults.standard.set(terminalSessions.map { session -> [String: String] in
+            let cwd = (session.cwdPath as NSString?)?.expandingTildeInPath ?? session.spawnDirectory?.path ?? ""
+            return ["cwd": cwd, "title": session.userTitle ?? ""]
+        }, forKey: SettingsKeys.lastTerminals)
     }
 
     /// iTerm2 컨텍스트 메뉴에서 단일 세션에 적용 가능한 항목만 (제작자 지시 2026-07-16)
@@ -1206,8 +1266,48 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         terminalSessions.forEach {
             applyTerminalFont(to: $0)
             theme.apply(to: $0)
+            $0.changeScrollback(Self.scrollbackLines)
         }
         refreshTerminalHostBackground()
+    }
+
+    /// 설정 스크롤백 줄 수 — 미설정이면 10,000. `changeScrollback(nil)`은 무제한이 아니라 0(실측 Terminal.swift:5556).
+    private static var scrollbackLines: Int {
+        let stored = UserDefaults.standard.integer(forKey: SettingsKeys.terminalScrollback)
+        return stored > 0 ? stored : 10_000
+    }
+
+    // MARK: 메뉴·단축키 진입 (Terminal 메뉴 — iTerm2 규약, decisions §36)
+    func newTerminalTabFromMenu() { newTerminalTab() }
+    func closeActiveTerminalTab() { confirmCloseTerminal(activeTerminalIndex) }
+    func clearActiveTerminalBuffer() { clearTerminalBuffer() }
+    /// ⌘F/⌘G/⇧⌘G — SwiftTerm 자체 찾기 바(정규식·전체 단어). 앱의 ⌘F가 파일 검색으로 직결돼 도달 불가였다(B§A1).
+    func terminalFind(_ action: NSTextFinder.Action) {
+        let item = NSMenuItem()
+        item.tag = action.rawValue
+        terminalView?.performTextFinderAction(item)
+    }
+    /// ⌘= / ⌘- — 설정 값(9~24pt)을 바꾸고 전 세션에 즉시 적용(설정 창 Stepper와 같은 단일 소스)
+    func adjustTerminalFontSize(by delta: Double) {
+        let stored = UserDefaults.standard.double(forKey: SettingsKeys.terminalFontSize)
+        let size = min(24, max(9, (stored > 0 ? stored : 12) + delta))
+        UserDefaults.standard.set(size, forKey: SettingsKeys.terminalFontSize)
+        terminalSessions.forEach(applyTerminalFont)
+    }
+    /// 선택 항목 → 터미널 인자 (킬러 C3): 터미널 탭으로 전환(없으면 생성) 후 경로만 입력 — 실행은 사용자 Enter(보안 규약)
+    func pastePathsIntoTerminal(_ urls: [URL]) {
+        if tabs.selectedSegment != 1 { tabs.selectedSegment = 1; tabChanged() }
+        typePathsInTerminal(urls)
+    }
+    /// 재실행 복원 대상 — 터미널 탭을 처음 열 때 소비(앱 시작 시 셸 N개를 미리 띄우지 않는다)
+    func restoreTerminalSessions(_ entries: [[String: String]]) { pendingTerminalRestore = entries }
+
+    /// 터미널 명령 뒤 트리 갱신 — 앱이 활성 상태라 §29의 "활성화 시 갱신" 트리거가 안 걸리는 구멍. 1.5초 코얼레싱.
+    private func scheduleTreeRefreshAfterCommand() {
+        treeRefreshWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.onTerminalCommand?() }
+        treeRefreshWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
 
     private func applyTerminalFont(to terminal: LocalProcessTerminalView) {
@@ -1297,6 +1397,22 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
     }
 
     /// TF_TERMINAL_CWD=1 — 최초 터미널 셸 pid 로그(외부 lsof로 실제 작업 폴더 실측, 제작자 지시 2026-07-23)
+    // TF_R1_TERMINAL — 1라운드 터미널 검증 (decisions §36)
+    func debugTerminalInfo() -> String {
+        func hasFindBar(_ view: NSView) -> Bool {
+            String(describing: type(of: view)).contains("FindBar") || view.subviews.contains(where: hasFindBar)
+        }
+        let titles = terminalSessions.enumerated().map { $0.element.tabTitle(fallback: "터미널 \($0.offset + 1)") }
+        let cwds = terminalSessions.map { $0.cwdPath ?? "nil" }
+        return "titles=\(titles) cwds=\(cwds) scrollback=\(terminalView?.getTerminal().options.scrollback ?? -1) " +
+            "font=\(terminalView?.font.pointSize ?? -1) findBar=\(hasFindBar(terminalHost))"
+    }
+    func debugTerminalOpenLink(_ link: String) {
+        guard let terminal = terminalView as? DropTerminalView else { return }
+        terminal.requestOpenLink(source: terminal, link: link, params: [:])
+    }
+    func debugActiveTerminalCwd() -> String { (terminalView as? DropTerminalView)?.cwdPath ?? "nil" }
+
     func debugLogTerminalPid() {
         guard terminalSessions.indices.contains(activeTerminalIndex) else { return }
         NSLog("TF_TERMINAL_CWD pid=%d", terminalSessions[activeTerminalIndex].process.shellPid)
@@ -1531,7 +1647,14 @@ extension PreviewViewController: LocalProcessTerminalViewDelegate {
         guard let terminal = source as? DropTerminalView else { return }
         if let directory, let url = URL(string: directory), url.isFileURL {
             terminal.cwdPath = (url.path as NSString).abbreviatingWithTildeInPath
-            if Self.isThisMac(url.host) { terminal.remoteTarget = nil }
+            if Self.isThisMac(url.host) {
+                terminal.remoteTarget = nil
+                // 셸 cd → 목록 따라가기 (킬러 C2, 기본 꺼짐). 셸→목록 한 방향만 — 역방향은 vi 오염으로 금지(결정 §6).
+                // 같은 폴더 no-op 가드는 수신측(followShellDirectory)이 담당 — OSC 7은 프롬프트마다 온다(동시성 위원).
+                if terminal === terminalView, UserDefaults.standard.bool(forKey: SettingsKeys.terminalFollowsCwd) {
+                    onFollowDirectory?(URL(fileURLWithPath: url.path, isDirectory: true))
+                }
+            }
         }
         refreshTerminalTabBar()
     }

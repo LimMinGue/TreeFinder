@@ -16,6 +16,11 @@ enum SettingsKeys {
     // 마지막 세션(탭 경로들·활성 탭) — 재실행 시 복원 (제작자 지시 2026-07-17)
     static let lastTabs = "LastSessionTabs"
     static let lastActiveTab = "LastSessionActiveTab"
+    // 위원회 2026-09-11 (decisions §36): 터미널 스크롤백·셸 cd 따라가기·터미널 탭 복원·검색 범위
+    static let terminalScrollback = "TerminalScrollbackLines"
+    static let terminalFollowsCwd = "TerminalFollowsCwd"
+    static let lastTerminals = "LastSessionTerminals"
+    static let searchThisMac = "SearchScopeThisMac"
     static let defaultTerminal = "/System/Applications/Utilities/Terminal.app"
 }
 
@@ -32,6 +37,8 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.terminalFontName) private var terminalFontName = "Menlo"
     @AppStorage(SettingsKeys.terminalFontSize) private var terminalFontSize = 12.0
     @AppStorage(SettingsKeys.terminalTheme) private var terminalTheme = TerminalTheme.all[0].id
+    @AppStorage(SettingsKeys.terminalScrollback) private var terminalScrollback = 10_000
+    @AppStorage(SettingsKeys.terminalFollowsCwd) private var terminalFollowsCwd = false
 
     /// 고정폭 폰트 패밀리 (파워라인/Nerd Font 포함 — 설치된 것만)
     private let monoFamilies: [String] = {
@@ -106,6 +113,10 @@ struct SettingsView: View {
                 Picker("Terminal theme", selection: $terminalTheme) {
                     ForEach(TerminalTheme.all, id: \.id) { Text(LocalizedStringKey($0.name)).tag($0.id) }
                 }
+                Picker("Scrollback", selection: $terminalScrollback) {
+                    ForEach([1_000, 10_000, 100_000], id: \.self) { Text("\($0.formatted()) lines").tag($0) }
+                }
+                Toggle("Follow shell directory in file list", isOn: $terminalFollowsCwd)
             } header: { Text("Terminal") } footer: {
                 Text("Used by the \"Open in Terminal\" command. The embedded Terminal tab always runs your login shell. Pick a Nerd Font if your prompt uses powerline glyphs. The theme applies to the embedded Terminal tab only.")
             }

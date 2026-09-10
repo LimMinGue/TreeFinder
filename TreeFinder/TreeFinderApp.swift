@@ -803,6 +803,211 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 sheet.sheetParent?.endSheet(sheet, returnCode: .cancel)   // 취소 = 삭제 안 함(픽스처 보존)
             }
         }
+        // TF_EMPTY_TRASH=1 → (TF_TRASH_DIRS=픽스처1:픽스처2 + TF_START_DIR=픽스처1[경로에 /.Trashes/ 포함] 병용)
+        // 메뉴 3곳 활성 상태 → 확인 시트 렌더 → 파괴 버튼 실클릭 → 픽스처 잔여 0(잠긴 파일 포함) → 메뉴 비활성 전환 실측
+        if ProcessInfo.processInfo.environment["TF_EMPTY_TRASH"] == "1" {
+            let trashURL = FileManager.default.urls(for: .trashDirectory, in: .userDomainMask).first
+            let probe = NSMenuItem(title: "", action: #selector(MainWindowController.emptyTrash(_:)), keyEquivalent: "")
+            func report(_ tag: String) {
+                let left = TrashLocations.items.map(\.lastPathComponent).sorted()
+                NSLog("EMPTY_TRASH %@ fileMenu=%@ tree=[%@] background=[%@] left=%@", tag,
+                      wc.validateMenuItem(probe) ? "활성" : "비활성",
+                      wc.debugTreeMenuTitles(forNodeAt: trashURL).joined(separator: " | "),
+                      wc.debugBackgroundMenuTitles().joined(separator: " | "), left.description)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { report("before") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { wc.emptyTrash(nil) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.4) {
+                guard let sheet = wc.window?.attachedSheet else { NSLog("EMPTY_TRASH sheet=none"); return }
+                if let cg = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(sheet.windowNumber),
+                                                    [.boundsIgnoreFraming, .bestResolution]), cg.width > 1 {
+                    try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?
+                        .write(to: URL(fileURLWithPath: "/tmp/treefinder-empty-trash-sheet.png"))
+                }
+                func button(in view: NSView, titled title: String) -> NSButton? {
+                    if let b = view as? NSButton, b.title == title { return b }
+                    return view.subviews.lazy.compactMap { button(in: $0, titled: title) }.first
+                }
+                let target = button(in: sheet.contentView!, titled: L("Empty Trash"))
+                NSLog("EMPTY_TRASH sheet=attached button=%@ default=%@", target == nil ? "없음" : "찾음",
+                      sheet.defaultButtonCell?.title ?? "-")
+                target?.performClick(nil)   // 실제 버튼 경로 — endSheet 우회 없음
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { report("after") }
+        }
+        // TF_R1_FILES=<픽스처 루트> → (TF_START_DIR=<루트>/dst 병용) 충돌 시트(둘 다 유지·병합·모두 적용+대치)·대치 undo·
+        // 선택 항목으로 새 폴더·정보 창 잠금 편집·검색 결과 들어있는 폴더 열기·Open With ⌥·새 윈도우 (decisions §36)
+        if let rootPath = ProcessInfo.processInfo.environment["TF_R1_FILES"] {
+            let root = URL(fileURLWithPath: rootPath), src = root.appendingPathComponent("src"), dst = root.appendingPathComponent("dst")
+            let at: (Double, @escaping () -> Void) -> Void = { delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) }
+            at(1.0) {
+                NSLog("R1_FILES openWith=[%@]", wc.debugOpenWithTitles().joined(separator: " | "))
+                NSLog("R1_FILES searchScope=[%@]", wc.debugSearchScopeTitles().joined(separator: " | "))
+                wc.debugPerformDrops(["a.txt", "b.txt", "dir"].map(src.appendingPathComponent), into: dst)   // 같은 볼륨 = 이동
+            }
+            at(2.2) {   // 시트 1: a.txt 파일 충돌 → 렌더 → 둘 다 유지
+                let sheet = Self.debugCaptureSheet(of: wc.window, to: "/tmp/treefinder-conflict-file.png")
+                NSLog("R1_FILES sheet1=%@ clicked=%d", sheet == nil ? "none" : "attached",
+                      Self.debugClickButton(in: sheet?.contentView, titled: L("Keep Both")) ? 1 : 0)
+            }
+            at(3.2) {   // 시트 2: dir 폴더 충돌 → 렌더 → 병합
+                let sheet = Self.debugCaptureSheet(of: wc.window, to: "/tmp/treefinder-conflict-folder.png")
+                NSLog("R1_FILES sheet2=%@ clicked=%d", sheet == nil ? "none" : "attached",
+                      Self.debugClickButton(in: sheet?.contentView, titled: L("Merge")) ? 1 : 0)
+            }
+            at(4.2) {   // 시트 3: dir/c.txt 중첩 충돌 → 모두 적용 + 대치
+                let sheet = wc.window?.attachedSheet
+                let all = Self.debugClickButton(in: sheet?.contentView, titled: L("Apply to All"))
+                NSLog("R1_FILES sheet3=%@ applyAll=%d clicked=%d", sheet == nil ? "none" : "attached", all ? 1 : 0,
+                      Self.debugClickButton(in: sheet?.contentView, titled: L("Replace")) ? 1 : 0)
+            }
+            at(6.0) {
+                NSLog("R1_FILES afterMerge dst=[%@]", Self.debugListing(dst))
+                NSLog("R1_FILES afterMerge src=[%@]", Self.debugListing(src))
+                wc.debugPerformDrops([src.appendingPathComponent("x.txt")], into: dst)   // 2단계: 대치 → undo
+            }
+            at(7.0) { NSLog("R1_FILES sheet4 clicked=%d", Self.debugClickButton(in: wc.window?.attachedSheet?.contentView, titled: L("Replace")) ? 1 : 0) }
+            at(8.2) { NSLog("R1_FILES afterReplace x=%@ srcX=%d", (try? String(contentsOf: dst.appendingPathComponent("x.txt"), encoding: .utf8)) ?? "nil",
+                            FileManager.default.fileExists(atPath: src.appendingPathComponent("x.txt").path) ? 1 : 0); wc.debugUndo() }
+            at(9.5) { NSLog("R1_FILES afterUndo x=%@ srcX=%d", (try? String(contentsOf: dst.appendingPathComponent("x.txt"), encoding: .utf8)) ?? "nil",
+                            FileManager.default.fileExists(atPath: src.appendingPathComponent("x.txt").path) ? 1 : 0) }
+            at(10.0) {   // 정보 창 잠금 편집
+                let lock = root.appendingPathComponent("lock.txt")
+                GetInfoWindowController.show(for: lock)
+                at(0.8) {
+                    let content = GetInfoWindowController.open.last?.window?.contentView
+                    NSLog("R1_FILES lockClick=%d", Self.debugClickButton(in: content, titled: L("Locked")) ? 1 : 0)
+                    at(0.5) {
+                        NSLog("R1_FILES lockedAfterOn=%d", ((try? lock.resourceValues(forKeys: [.isUserImmutableKey]))?.isUserImmutable ?? false) ? 1 : 0)
+                        Self.debugClickButton(in: content, titled: L("Locked"))
+                        at(0.5) { NSLog("R1_FILES lockedAfterOff=%d", ((try? lock.resourceValues(forKeys: [.isUserImmutableKey]))?.isUserImmutable ?? false) ? 1 : 0)
+                                  GetInfoWindowController.open.last?.close() }
+                    }
+                }
+            }
+            at(12.5) { wc.debugSearch("target") }   // 검색 결과 → 들어있는 폴더 열기
+            at(14.5) {
+                NSLog("R1_FILES searchMenuHasEnclosing=%d", wc.debugItemMenuTitles().contains(L("Show in Enclosing Folder")) ? 1 : 0)
+                wc.debugRevealFile(dst.appendingPathComponent("nested/deep/target.txt"))
+            }
+            at(16.0) {
+                NSLog("R1_FILES afterReveal dir=%@ selected=%@", wc.debugCurrentDirectory(), wc.debugSelectedName())
+                wc.debugShow(dst)
+            }
+            at(17.0) { wc.debugSelectAll(); wc.newFolderWithSelection(nil) }   // 선택 항목으로 새 폴더
+            at(19.0) {
+                NSLog("R1_FILES newFolderWithSelection editing=%@ dst=[%@]", wc.debugEditingState(), Self.debugListing(dst))
+                wc.debugCommitEditing()
+                let before = NSApp.windows.filter { $0.isVisible }.count
+                wc.newWindow(nil)
+                NSLog("R1_FILES newWindow windows %d → %d", before, NSApp.windows.filter { $0.isVisible }.count)
+            }
+        }
+        // TF_R1_TERMINAL=<픽스처 루트> → 터미널 포커스 메뉴 검증·세션 복원·스크롤백·⌘=·찾기 바·경로 ⌘클릭·cd 따라가기·명령 뒤 트리 갱신
+        if let rootPath = ProcessInfo.processInfo.environment["TF_R1_TERMINAL"] {
+            let root = URL(fileURLWithPath: rootPath)
+            let probes = ["newWindowForTab:", "closeTab:", "connectToServer:", "newTerminalTab:", "findNext:", "clearTerminalBuffer:"]
+            func validation() -> String { probes.map { "\($0)=\(wc.debugMenuEnabled($0) ? "활성" : "비활성")" }.joined(separator: " ") }
+            let at: (Double, @escaping () -> Void) -> Void = { delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) }
+            let followKey = SettingsKeys.terminalFollowsCwd
+            let previousFollow = UserDefaults.standard.object(forKey: followKey)
+            at(1.0) {
+                NSLog("R1_TERM listFocus %@", validation())
+                wc.debugRestoreTerminals([["cwd": root.appendingPathComponent("sub").path, "title": "복원탭"],
+                                          ["cwd": root.path, "title": ""]])
+                wc.debugShowTerminal()
+            }
+            at(2.5) {
+                NSLog("R1_TERM terminalFocus %@", validation())
+                NSLog("R1_TERM restored %@", wc.debugTerminalInfo())
+                wc.terminalBiggerText(nil)
+                wc.focusSearch(nil)   // 터미널 포커스 = 찾기 바
+            }
+            at(3.3) {
+                NSLog("R1_TERM afterBiggerAndFind %@", wc.debugTerminalInfo())
+                wc.terminalSmallerText(nil)
+                wc.debugTerminalOpenLink(root.appendingPathComponent("file.txt").path + ":12")   // 경로 ⌘클릭(줄 접미)
+            }
+            at(4.6) {
+                NSLog("R1_TERM afterLink dir=%@ selected=%@", wc.debugCurrentDirectory(), wc.debugSelectedName())
+                UserDefaults.standard.set(true, forKey: followKey)
+                wc.debugShowTerminal()
+                at(0.3) { wc.debugTerminalType("cd \(root.appendingPathComponent("other").path)\n") }   // 실제 cd(다른 폴더) → 셸이 OSC 7을 보내는지
+            }
+            at(7.0) {
+                NSLog("R1_TERM afterCd cwd=%@ dir=%@ treeRefresh=%d", wc.debugActiveTerminalCwd(), wc.debugCurrentDirectory(), wc.debugTreeRefreshCount)
+                if let previousFollow { UserDefaults.standard.set(previousFollow, forKey: followKey) } else { UserDefaults.standard.removeObject(forKey: followKey) }
+                // 실제 키 이벤트로 ⌘W → 터미널 포커스면 "터미널 탭 닫기" 확인 시트(파일 탭이 닫히면 안 됨)
+                wc.window?.makeKeyAndOrderFront(nil)
+                wc.debugShowTerminal()
+                at(0.3) {
+                    let flags: NSEvent.ModifierFlags = [.command]
+                    if let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                                                   windowNumber: wc.window?.windowNumber ?? 0, context: nil, characters: "w",
+                                                   charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 13) {
+                        NSApp.postEvent(down, atStart: false)
+                    }
+                }
+                at(1.2) {
+                    let sheet = wc.window?.attachedSheet
+                    NSLog("R1_TERM cmdW sheet=%@ tabs=%d", sheet == nil ? "none" : sheet!.title.isEmpty ? "attached" : sheet!.title, wc.tabTitles.count)
+                    if let sheet { sheet.sheetParent?.endSheet(sheet, returnCode: .cancel) }
+                }
+            }
+        }
+        // TF_HWP_SEARCH=<본문에만 있는 단어> → (TF_START_DIR=HWP 픽스처 폴더) 이 폴더 검색 → 이 Mac 검색 → 캐시 적중 재검색 (decisions §37)
+        if let word = ProcessInfo.processInfo.environment["TF_HWP_SEARCH"] {
+            let scopeKey = SettingsKeys.searchThisMac
+            let previousScope = UserDefaults.standard.object(forKey: scopeKey)
+            let at: (Double, @escaping () -> Void) -> Void = { delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) }
+            at(0.8) { wc.debugSetSearchThisMac(false); wc.debugSearch(word) }
+            at(4.0) { NSLog("HWP_SEARCH folder=[%@]", wc.debugItemNames().joined(separator: " | ")); wc.debugSetSearchThisMac(true); wc.debugSearch(word) }
+            at(9.0) {
+                NSLog("HWP_SEARCH thisMac count=%d first=%@", wc.debugItemNames().count, wc.debugItemNames().first ?? "-")
+                wc.debugSetSearchThisMac(false)
+                let start = Date()
+                wc.debugSearch(word)
+                at(1.5) { NSLog("HWP_SEARCH cachedFolder=[%@] elapsed<=%.1fs", wc.debugItemNames().joined(separator: " | "), Date().timeIntervalSince(start)) }
+            }
+            at(11.0) { if let previousScope { UserDefaults.standard.set(previousScope, forKey: scopeKey) } else { UserDefaults.standard.removeObject(forKey: scopeKey) } }
+        }
+        // TF_HWP_EXPORT=1 → (TF_START_DIR=HWP 픽스처 폴더) 본문 텍스트 복사(클립보드 앞부분 로그) → PDF 내보내기(파일 존재 로그)
+        if ProcessInfo.processInfo.environment["TF_HWP_EXPORT"] == "1" {
+            let dir = startDirectory
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { wc.debugCopyDocumentText() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                let clip = NSPasteboard.general.string(forType: .string) ?? ""
+                NSLog("HWP_EXPORT clipboard chars=%d head=%@", clip.count, String(clip.prefix(60)).replacingOccurrences(of: "\n", with: " "))
+                wc.debugExportPDF()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
+                let pdfs = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasSuffix(".pdf") }
+                let sizes = pdfs.map { name -> String in
+                    let size = (try? FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent(name).path))?[.size] as? Int ?? 0
+                    return "\(name)=\(size)B"
+                }
+                NSLog("HWP_EXPORT pdfs=[%@]", sizes.joined(separator: " | "))
+            }
+        }
+        // TF_R1_MENUS=1 → File·Go·Terminal 메뉴 구성(제목·단축키) 로그
+        if ProcessInfo.processInfo.environment["TF_R1_MENUS"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                for title in [L("File"), L("Go"), L("Terminal")] {
+                    guard let menu = NSApp.mainMenu?.item(withTitle: title)?.submenu else { continue }
+                    let entries = menu.items.map { item -> String in
+                        if item.isSeparatorItem { return "─" }
+                        var mods = ""
+                        if item.keyEquivalentModifierMask.contains(.control) { mods += "⌃" }
+                        if item.keyEquivalentModifierMask.contains(.option) { mods += "⌥" }
+                        if item.keyEquivalentModifierMask.contains(.shift) { mods += "⇧" }
+                        if item.keyEquivalentModifierMask.contains(.command) || !item.keyEquivalent.isEmpty { mods += "⌘" }
+                        let key = item.keyEquivalent == "\u{08}" ? "⌫" : item.keyEquivalent == "\r" ? "⏎" : item.keyEquivalent == "\u{F700}" ? "↑" : item.keyEquivalent.uppercased()
+                        return item.keyEquivalent.isEmpty ? item.title : "\(item.title)[\(mods)\(key)]"
+                    }
+                    NSLog("R1_MENUS %@: %@", title, entries.joined(separator: " | "))
+                }
+            }
+        }
         // TF_COMPRESS=1 → (TF_START_DIR=픽스처 병용: '-r'·'--help'·normal.txt) 전체 선택 압축 → 아카이브 항목 수 실측 (A3)
         if ProcessInfo.processInfo.environment["TF_COMPRESS"] == "1" {
             let dir = startDirectory
@@ -911,6 +1116,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 뷰 직접 렌더 스냅숏 — 창 서버 캡처가 백지인 환경 대응. 비브런시가 투명으로
     /// 렌더되어 다크 글자가 흰 PNG 바탕에 묻히므로 창 배경색 위에 합성한다(실측 2026-07-16).
+    /// 시트(별도 창)를 창 서버로 캡처 — 시트가 없으면 nil
+    @discardableResult
+    private static func debugCaptureSheet(of window: NSWindow?, to path: String) -> NSWindow? {
+        guard let sheet = window?.attachedSheet else { return nil }
+        if let cg = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(sheet.windowNumber),
+                                            [.boundsIgnoreFraming, .bestResolution]), cg.width > 1 {
+            try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: path))
+        }
+        return sheet
+    }
+    /// 제목으로 버튼을 찾아 실제 클릭(performClick) — 시트 버튼·체크박스 공용
+    @discardableResult
+    private static func debugClickButton(in root: NSView?, titled title: String) -> Bool {
+        func find(_ view: NSView) -> NSButton? {
+            if let button = view as? NSButton, button.title == title { return button }
+            return view.subviews.lazy.compactMap(find).first
+        }
+        guard let root, let button = find(root) else { return false }
+        button.performClick(nil)
+        return true
+    }
+    private static func debugListing(_ root: URL) -> String {
+        let fm = FileManager.default
+        guard let e = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return "?" }
+        return e.compactMap { $0 as? URL }.map { url in
+            let rel = String(url.path.dropFirst(root.path.count + 1))
+            let body = (try? String(contentsOf: url, encoding: .utf8))?.trimmingCharacters(in: .newlines)
+            return body.map { "\(rel)=\($0)" } ?? rel
+        }.sorted().joined(separator: ", ")
+    }
+
     private static func debugCaptureContent(of window: NSWindow?, to path: String) {
         guard let window, let view = window.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
@@ -954,23 +1191,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         addSubmenu(appMenu, titled: "TreeFinder", to: main)
 
+        // File 메뉴 — Finder 순서(새 윈도우·새 탭 / 새 폴더류 / 열기·정보 / 복제·휴지통 / 탭 닫기), decisions §36
         let fileMenu = NSMenu(title: L("File"))
-        let newTab = NSMenuItem(title: L("New Tab"),
-                                action: #selector(NSResponder.newWindowForTab(_:)), keyEquivalent: "t")
-        fileMenu.addItem(newTab)
-        fileMenu.addItem(withTitle: L("New Text Document"),
-                         action: #selector(MainWindowController.newTextDocument(_:)), keyEquivalent: "")
-        fileMenu.addItem(withTitle: L("Open"),
-                         action: #selector(MainWindowController.openSelected(_:)), keyEquivalent: "o")
+        func fileItem(_ title: String, _ selector: Selector, _ key: String, _ modifiers: NSEvent.ModifierFlags = [.command]) {
+            let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            fileMenu.addItem(item)
+        }
+        fileItem(L("New Window"), #selector(MainWindowController.newWindow(_:)), "n")   // ⌘N (Finder 규약)
+        fileItem(L("New Tab"), #selector(NSResponder.newWindowForTab(_:)), "t")
         fileMenu.addItem(.separator())
-        fileMenu.addItem(withTitle: L("Get Info"),   // 선택 없으면 현재 폴더 (decisions §17)
-                         action: #selector(MainWindowController.getInfoSelected(_:)), keyEquivalent: "i")
+        fileItem(L("New Folder"), #selector(MainWindowController.newFolder(_:)), "n", [.command, .shift])
+        fileItem(L("New Folder with Selection"), #selector(MainWindowController.newFolderWithSelection(_:)), "n", [.command, .control])
+        fileItem(L("New Text Document"), #selector(MainWindowController.newTextDocument(_:)), "")
         fileMenu.addItem(.separator())
-        fileMenu.addItem(withTitle: L("Restore"),   // 휴지통 put-back — TreeFinder 삭제분만 (decisions §14)
-                         action: #selector(MainWindowController.restoreSelected(_:)), keyEquivalent: "")
+        fileItem(L("Open"), #selector(MainWindowController.openSelected(_:)), "o")
+        fileItem(L("Get Info"), #selector(MainWindowController.getInfoSelected(_:)), "i")   // 선택 없으면 현재 폴더 (decisions §17)
         fileMenu.addItem(.separator())
-        fileMenu.addItem(withTitle: L("Close Tab"),
-                         action: #selector(MainWindowController.closeTab(_:)), keyEquivalent: "w")
+        fileItem(L("Duplicate"), #selector(MainWindowController.duplicateSelected(_:)), "d")
+        fileItem(L("Move to Trash"), #selector(MainWindowController.deleteSelected(_:)), "\u{08}")
+        fileItem(L("Empty Trash…"), #selector(MainWindowController.emptyTrash(_:)), "\u{08}", [.command, .shift])
+        fileItem(L("Restore"), #selector(MainWindowController.restoreSelected(_:)), "")   // 휴지통 put-back — TreeFinder 삭제분만 (decisions §14)
+        fileMenu.addItem(.separator())
+        fileItem(L("Close Tab"), #selector(MainWindowController.closeTab(_:)), "w")
         addSubmenu(fileMenu, titled: L("File"), to: main)
 
         let editMenu = NSMenu(title: L("Edit"))
@@ -1031,17 +1274,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         viewMenu.addItem(fullScreen)
         addSubmenu(viewMenu, titled: L("View"), to: main)
 
-        let fileOpsMenu = main.item(withTitle: L("File"))?.submenu
-        fileOpsMenu?.insertItem(NSMenuItem.separator(), at: 1)
-        let newFolderItem = NSMenuItem(title: L("New Folder"),
-                                       action: #selector(MainWindowController.newFolder(_:)), keyEquivalent: "n")
-        newFolderItem.keyEquivalentModifierMask = [.command, .shift]
-        fileOpsMenu?.insertItem(newFolderItem, at: 2)
-        let trashItem = NSMenuItem(title: L("Move to Trash"),
-                                   action: #selector(MainWindowController.deleteSelected(_:)), keyEquivalent: "\u{08}")
-        trashItem.keyEquivalentModifierMask = [.command]
-        fileOpsMenu?.insertItem(trashItem, at: 3)
-
         let goMenu = NSMenu(title: L("Go"))
         let back = NSMenuItem(title: L("Back"),
                               action: #selector(MainWindowController.goBack(_:)), keyEquivalent: "[")
@@ -1062,7 +1294,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                   action: #selector(MainWindowController.goToFolder(_:)), keyEquivalent: "l"))
         goMenu.addItem(NSMenuItem(title: L("Connect to Server…"),
                                   action: #selector(MainWindowController.connectToServer(_:)), keyEquivalent: "k"))
+        goMenu.addItem(.separator())
+        // 표준 폴더 — Finder Go 메뉴 단축키 패리티 (decisions §36). 데스크탑은 ⇧⌘D가 듀얼 페인이라 단축키 없음(제작자 확정).
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let utilities = FileManager.default.fileExists(atPath: "/Applications/Utilities")
+            ? "/Applications/Utilities" : "/System/Applications/Utilities"
+        let standardFolders: [(String, URL, String, NSEvent.ModifierFlags)] = [
+            (L("Computer"), URL(fileURLWithPath: "/", isDirectory: true), "c", [.command, .shift]),
+            (L("Home"), home, "h", [.command, .shift]),
+            (L("Desktop"), home.appendingPathComponent("Desktop", isDirectory: true), "", []),
+            (L("Documents"), home.appendingPathComponent("Documents", isDirectory: true), "o", [.command, .shift]),
+            (L("Downloads"), home.appendingPathComponent("Downloads", isDirectory: true), "l", [.command, .option]),
+            (L("Applications"), URL(fileURLWithPath: "/Applications", isDirectory: true), "a", [.command, .shift]),
+            (L("Utilities"), URL(fileURLWithPath: utilities, isDirectory: true), "u", [.command, .shift]),
+            (L("iCloud Drive"), home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true), "i", [.command, .shift]),
+            (L("Network"), FileListViewController.networkURL, "k", [.command, .shift]),
+        ]
+        for (title, url, key, modifiers) in standardFolders {
+            let item = NSMenuItem(title: title, action: #selector(MainWindowController.goToStandardFolder(_:)), keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            item.representedObject = url
+            goMenu.addItem(item)
+        }
         addSubmenu(goMenu, titled: L("Go"), to: main)
+
+        // Terminal 메뉴 — 터미널 포커스 단축키(iTerm2 규약)와 통합 기능 진입점 (decisions §36)
+        let terminalMenu = NSMenu(title: L("Terminal"))
+        func terminalItem(_ title: String, _ selector: Selector, _ key: String, _ modifiers: NSEvent.ModifierFlags = [.command]) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            return item
+        }
+        // ⌘T·⌘W·⌘K·⇧⌘G는 File/Go 항목과 같은 키라 여기엔 비워 둔다 — AppKit이 메뉴바 중복 키를 지우기 때문(실측).
+        // 실제 단축키는 그 항목들이 "키 호출 + 터미널 포커스"일 때 터미널 동작으로 분기한다(MainWindowController).
+        terminalMenu.addItem(terminalItem(L("New Terminal Tab"), #selector(MainWindowController.newTerminalTab(_:)), ""))
+        terminalMenu.addItem(terminalItem(L("Close Terminal Tab"), #selector(MainWindowController.closeTerminalTab(_:)), ""))
+        terminalMenu.addItem(.separator())
+        terminalMenu.addItem(terminalItem(L("Find Next"), #selector(MainWindowController.findNext(_:)), "g"))
+        terminalMenu.addItem(terminalItem(L("Find Previous"), #selector(MainWindowController.findPrevious(_:)), ""))
+        terminalMenu.addItem(terminalItem(L("Clear Buffer"), #selector(MainWindowController.clearTerminalBuffer(_:)), ""))
+        terminalMenu.addItem(.separator())
+        terminalMenu.addItem(terminalItem(L("Bigger Text"), #selector(MainWindowController.terminalBiggerText(_:)), "="))
+        terminalMenu.addItem(terminalItem(L("Smaller Text"), #selector(MainWindowController.terminalSmallerText(_:)), "-"))
+        terminalMenu.addItem(.separator())
+        terminalMenu.addItem(terminalItem(L("Paste Path into Terminal"), #selector(MainWindowController.pasteSelectionIntoTerminal(_:)), "\r", [.command, .option]))
+        terminalMenu.addItem(terminalItem(L("Follow Shell Directory"), #selector(MainWindowController.toggleTerminalFollow(_:)), ""))
+        addSubmenu(terminalMenu, titled: L("Terminal"), to: main)
 
         let windowMenu = NSMenu(title: L("Window"))
         windowMenu.addItem(withTitle: L("Minimize"),

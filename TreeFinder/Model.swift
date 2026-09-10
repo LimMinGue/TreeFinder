@@ -126,6 +126,31 @@ enum RestoreRecords {
     }
 }
 
+/// 비우기 대상 휴지통 = 홈 + 로컬 볼륨(`.Trashes/<uid>`) — 제작자 확정 2026-09-11.
+/// 네트워크 볼륨은 `url(for: .trashDirectory, appropriateFor:)`가 nil을 주고(실측) 규약상 메인 stat 금지라 제외(Finder와의 차이).
+@MainActor enum TrashLocations {
+    static var directories: [URL] {
+        #if DEBUG
+        if let override = ProcessInfo.processInfo.environment["TF_TRASH_DIRS"] {   // 검증 픽스처 — 제작자 실제 휴지통 보호
+            return override.split(separator: ":").map { URL(fileURLWithPath: String($0), isDirectory: true) }
+        }
+        #endif
+        let fm = FileManager.default
+        var seen = Set<String>()
+        return ([fm.homeDirectoryForCurrentUser] + VolumeMonitor.shared.localVolumes)
+            .compactMap { try? fm.url(for: .trashDirectory, in: .userDomainMask, appropriateFor: $0, create: false) }
+            .filter { seen.insert($0.standardizedFileURL.path).inserted }
+    }
+
+    /// 휴지통 최상위 항목(.DS_Store 제외) — 메뉴 활성 판정과 비우기가 같은 목록을 본다(로컬 볼륨만이라 동기 리스팅 허용)
+    static var items: [URL] {
+        directories.flatMap { dir in
+            ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.lastPathComponent != ".DS_Store" }
+        }
+    }
+}
+
 enum ExternalOpen {
     /// Settings ▸ Terminal에서 고른 앱으로 폴더 열기 (decisions §11)
     static func inTerminal(_ url: URL) {

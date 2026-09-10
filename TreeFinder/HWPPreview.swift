@@ -22,10 +22,11 @@ enum HWPPreview {
         if let pages = HWPRenderer.renderPages(of: url), !pages.isEmpty {
             return Result(pages: pages, text: nil)
         }
-        // rhwp 부재/실패 — 내장 미리보기 리소스 폴백
+        // rhwp 렌더 실패 — 텍스트는 가능하면 전문(export-text, 표 셀 포함), 아니면 내장 PrvText(첫 쪽 요약) (decisions §37)
+        let fullText = HWPRenderer.extractText(of: url)
         switch url.pathExtension.lowercased() {
-        case "hwpx": return extractHWPX(url)
-        case "hwp": return extractHWP(url)
+        case "hwpx": return extractHWPX(url, fullText: fullText)
+        case "hwp": return extractHWP(url, fullText: fullText)
         default: return nil
         }
     }
@@ -45,10 +46,10 @@ enum HWPPreview {
         return (process.terminationStatus == 0 && !data.isEmpty) ? data : nil
     }
 
-    private static func extractHWPX(_ url: URL) -> Result? {
+    private static func extractHWPX(_ url: URL, fullText: String? = nil) -> Result? {
         let image = unzipEntry(url, "Preview/PrvImage.png").flatMap(NSImage.init(data:))
-        var text: String?
-        if let data = unzipEntry(url, "Preview/PrvText.txt") {
+        var text: String? = fullText
+        if text == nil, let data = unzipEntry(url, "Preview/PrvText.txt") {
             text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16LittleEndian)
         }
         return (image == nil && text == nil) ? nil : Result(pages: image.map { [$0] } ?? [], text: text)
@@ -56,14 +57,61 @@ enum HWPPreview {
 
     // MARK: HWP (CFB/OLE) — 최소 컴파운드 파일 리더 (모든 읽기 경계 검사 — 손상 파일은 nil 폴백)
 
-    private static func extractHWP(_ url: URL) -> Result? {
+    private static func extractHWP(_ url: URL, fullText: String? = nil) -> Result? {
         guard let data = try? Data(contentsOf: url), let cfb = CFBReader(data) else { return nil }
         let image = cfb.stream(named: "PrvImage").flatMap(NSImage.init(data:))
-        let text = cfb.stream(named: "PrvText").flatMap {
+        let text = fullText ?? cfb.stream(named: "PrvText").flatMap {
             String(data: $0, encoding: .utf16LittleEndian)?
                 .trimmingCharacters(in: .controlCharacters.union(.whitespacesAndNewlines))
         }
         return (image == nil && text == nil) ? nil : Result(pages: image.map { [$0] } ?? [], text: text)
+    }
+}
+
+/// HWP/HWPX 본문 검색 — Spotlight는 HWP 본문을 색인하지 않는다(이 기기 색인기 0건 실측, 한컴 뷰어 설치와 무관).
+/// rhwp `export-text`(HWPRenderer.extractText 캐시)로 직접 매칭 (위원회 2026-09-11 decisions §37). 백그라운드 큐 전용.
+/// 후보 = 이 폴더: 파일 열거 / 이 Mac: Spotlight **이름** 색인(mdfind — 본문은 몰라도 이름은 안다). NFC·대소문자 무시 포함 비교.
+enum HWPTextSearch {
+    static let fileCap = 500   // ponytail: 상한 초과분은 검색하지 않는다(열거 순) — 캐시 콜드 8ms/파일 × 500 = 4초 상한
+
+    static func matches(query: String, in directory: URL, thisMac: Bool, nonLocalRoots: Set<URL>) -> [URL] {
+        let needle = PathPasteboard.normalized(query)
+        guard !needle.isEmpty else { return [] }
+        let candidates = (thisMac ? spotlightHWPFiles() : enumerateHWPFiles(in: directory))
+            .filter { url in !nonLocalRoots.contains { url.path.hasPrefix($0.path.hasSuffix("/") ? $0.path : $0.path + "/") } }   // 죽은 마운트 행 방지
+        var hits: [URL] = []
+        for url in candidates.prefix(fileCap) {
+            if Task.isCancelled { break }
+            guard let text = HWPRenderer.extractText(of: url) else { continue }   // 암호화·손상·상한 초과 = 조용히 제외
+            if PathPasteboard.normalized(text).localizedCaseInsensitiveContains(needle) { hits.append(url) }
+        }
+        return hits
+    }
+
+    private static func enumerateHWPFiles(in directory: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory, includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
+        var out: [URL] = []
+        for case let url as URL in enumerator where HWPPreview.isHWPFamily(url) {
+            out.append(url)
+            if out.count >= fileCap { break }
+        }
+        return out
+    }
+
+    private static func spotlightHWPFiles() -> [URL] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
+        process.arguments = ["kMDItemFSName == '*.hwp'c || kMDItemFSName == '*.hwpx'c"]
+        let pipe = Pipe()
+        process.standardOutput = pipe   // 읽는다(readDataToEndOfFile) — 버리는 게 아니라서 Pipe 사용 가능
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (String(data: data, encoding: .utf8) ?? "").split(separator: "\n").prefix(fileCap)
+            .map { URL(fileURLWithPath: String($0)) }
     }
 }
 
@@ -215,37 +263,78 @@ enum HWPRenderer {
         }
     }
 
-    /// 캐시 폴더 — 키 = SHA256(NFC 경로 | 수정일): 내용이 바뀌면 자동 재렌더
-    private static func cacheDirectory(for url: URL) -> URL? {
+    /// 캐시 폴더 — 키 = SHA256(NFC 경로 | 수정일): 내용이 바뀌면 자동 재렌더. root = 렌더(rhwp)·본문 텍스트(rhwp-text) 분리
+    /// (같은 폴더를 쓰면 텍스트만 뽑은 폴더를 renderPages가 '렌더 완료'로 오판한다 — decisions §37).
+    private static func cacheDirectory(for url: URL, root: String = "rhwp") -> URL? {
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
         let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
             .contentModificationDate?.timeIntervalSince1970 ?? 0
         let key = "\(PathPasteboard.normalized(url.path))|\(mtime)"
         let digest = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
-        return caches.appendingPathComponent("TreeFinder/rhwp/\(digest)", isDirectory: true)
+        return caches.appendingPathComponent("TreeFinder/\(root)/\(digest)", isDirectory: true)
+    }
+
+    /// rhwp 실행 공용 — 출력은 버리고(읽지 않는 Pipe는 64KB에서 자식이 블록되는 규약 A4) 타임아웃 킬러. 성공 = 종료 코드 0.
+    private static func run(_ arguments: [String], timeout: Double) -> Bool {
+        guard let binary = binaryURL else { return false }
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return false }
+        let killer = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
+        process.waitUntilExit()
+        killer.cancel()
+        return process.terminationStatus == 0
+    }
+
+    /// 본문 텍스트(전 페이지, 표 셀 포함) — `export-text`. 검색·미리보기 텍스트 폴백·본문 복사의 **단일 창구**(decisions §37).
+    /// 캐시 = 렌더와 같은 키(경로|수정일), 루트 `rhwp-text`. 암호화·손상·크기 상한 초과 = nil. 백그라운드 큐에서 호출할 것.
+    static let textFileSizeCap = 50 << 20   // 50MB 초과는 제외 — 파일 매니저가 임의 문서를 여는 구조의 방어선(보안 위원)
+    static func extractText(of url: URL) -> String? {
+        guard let cacheDir = cacheDirectory(for: url, root: "rhwp-text") else { return nil }
+        let cached = cacheDir.appendingPathComponent("text.txt")
+        if let text = try? String(contentsOf: cached, encoding: .utf8) { return text }
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        guard size <= textFileSizeCap else { return nil }
+        let fm = FileManager.default
+        let staging = cacheDir.deletingLastPathComponent()
+            .appendingPathComponent(cacheDir.lastPathComponent + ".tmp-\(ProcessInfo.processInfo.processIdentifier)")
+        try? fm.removeItem(at: staging)
+        try? fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: staging) }
+        guard run(["export-text", url.path, "-o", staging.path], timeout: 10) else { return nil }
+        let parts = ((try? fm.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension.lowercased() == "txt" }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }   // _001, _002 … 페이지 순
+        let text = parts.compactMap { try? String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n")
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        try? fm.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        try? text.write(to: cached, atomically: true, encoding: .utf8)
+        pruneCache(root: cacheDir.deletingLastPathComponent())
+        return text
+    }
+
+    /// PDF 내보내기 — `export-pdf`(svg2pdf). 출력은 파일 경로. 실패·빈 결과면 잔해 삭제 후 false. 충실도 = rhwp 렌더 기준(상류 굵게 소실 결함 #6936 열림).
+    static func exportPDF(of url: URL, to output: URL) -> Bool {
+        let ok = run(["export-pdf", url.path, "-o", output.path, "--fallback-sans", "Apple SD Gothic Neo"], timeout: 60)
+        let size = (try? output.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        guard ok, size > 0 else { try? FileManager.default.removeItem(at: output); return false }
+        return true
     }
 
     static func renderPages(of url: URL) -> [NSImage]? {
-        guard let binary = binaryURL, let cacheDir = cacheDirectory(for: url) else { return nil }
+        guard binaryURL != nil, let cacheDir = cacheDirectory(for: url) else { return nil }
         let fm = FileManager.default
         if !fm.fileExists(atPath: cacheDir.path) {
             let staging = cacheDir.deletingLastPathComponent()
                 .appendingPathComponent(cacheDir.lastPathComponent + ".tmp-\(ProcessInfo.processInfo.processIdentifier)")
             try? fm.removeItem(at: staging)
             try? fm.createDirectory(at: staging, withIntermediateDirectories: true)
-            let process = Process()
-            process.executableURL = binary
             // --font-style: 시스템 폰트 local() 참조 — NSImage(CoreSVG)가 로컬 폰트로 텍스트 렌더
-            process.arguments = ["export-svg", url.path, "-o", staging.path, "--font-style"]
-            // 읽지 않는 Pipe는 64KB에서 rhwp가 블록돼 타임아웃까지 헛돈다 — 출력은 버린다(A4, ArchiveListing 규약)
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            guard (try? process.run()) != nil else { return nil }
-            let killer = DispatchWorkItem { if process.isRunning { process.terminate() } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds, execute: killer)
-            process.waitUntilExit()
-            killer.cancel()
-            guard process.terminationStatus == 0 else {
+            guard run(["export-svg", url.path, "-o", staging.path, "--font-style"], timeout: timeoutSeconds) else {
                 try? fm.removeItem(at: staging)
                 return nil
             }

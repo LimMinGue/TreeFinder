@@ -210,7 +210,8 @@ final class GetInfoWindowController: NSWindowController, NSWindowDelegate {
         addRow(to: column, L("Created"), Self.dateOrNil(values?.creationDate))
         addRow(to: column, L("Modified"), Self.dateOrNil(values?.contentModificationDate))
 
-        let locked = readOnlyCheckbox(L("Locked"), checked: values?.isUserImmutable ?? false)
+        let locked = editableCheckbox(L("Locked"), checked: values?.isUserImmutable ?? false,
+                                      action: #selector(toggleLocked(_:)))   // 편집 가능 (decisions §36)
         column.addArrangedSubview(locked)
         return column
     }
@@ -243,8 +244,8 @@ final class GetInfoWindowController: NSWindowController, NSWindowDelegate {
         field.translatesAutoresizingMaskIntoConstraints = false
         field.widthAnchor.constraint(equalToConstant: 264).isActive = true
         column.addArrangedSubview(field)
-        column.addArrangedSubview(readOnlyCheckbox(L("Hide extension"),
-                                                   checked: values?.hasHiddenExtension ?? false))
+        column.addArrangedSubview(editableCheckbox(L("Hide extension"), checked: values?.hasHiddenExtension ?? false,
+                                                   action: #selector(toggleHiddenExtension(_:))))   // 편집 가능 (decisions §36)
         return column
     }
 
@@ -338,6 +339,34 @@ final class GetInfoWindowController: NSWindowController, NSWindowDelegate {
         row.alignment = .firstBaseline
         row.spacing = 6
         column.addArrangedSubview(row)
+    }
+
+    /// 편집 가능 체크박스 — 잠금·확장자 가리기는 공개 API(URLResourceValues 쓰기)라 v1 읽기 전용에서 승격 (위원회 2026-09-11).
+    /// 권한 편집·주석 등 나머지는 읽기 전용 유지(decisions §17).
+    private func editableCheckbox(_ title: String, checked: Bool, action: Selector) -> NSButton {
+        let box = NSButton(checkboxWithTitle: title, target: self, action: action)
+        box.state = checked ? .on : .off
+        box.font = .systemFont(ofSize: 11)
+        return box
+    }
+
+    @objc private func toggleLocked(_ sender: NSButton) {
+        var values = URLResourceValues(); values.isUserImmutable = sender.state == .on
+        applyResourceValues(values, revert: sender)
+    }
+
+    @objc private func toggleHiddenExtension(_ sender: NSButton) {
+        var values = URLResourceValues(); values.hasHiddenExtension = sender.state == .on
+        applyResourceValues(values, revert: sender)
+    }
+
+    /// 실패(권한 없음·읽기 전용 볼륨)면 체크 상태를 되돌리고 알림음 — 조용한 실패 금지
+    private func applyResourceValues(_ values: URLResourceValues, revert sender: NSButton) {
+        var target = url
+        do { try target.setResourceValues(values) } catch {
+            sender.state = sender.state == .on ? .off : .on
+            NSSound.beep()
+        }
     }
 
     private func readOnlyCheckbox(_ title: String, checked: Bool) -> NSButton {

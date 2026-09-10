@@ -607,12 +607,15 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     /// TF_TREE_MANUAL — 우클릭 메뉴 구성을 실제 빌드 경로로 확인(사이드바 비브런시라 스냅숏이 백지, §18 한계 우회).
     /// url=nil → 빈 공간 우클릭 재현.
     func debugMenuTitles(forNodeAt url: URL?) -> [String] {
-        let item: Any? = url.flatMap {
-            materializedNode(matching: PathPasteboard.normalized($0.standardizedFileURL.path))
+        let item: Any? = url.flatMap { u -> Any? in
+            let key = PathPasteboard.normalized(u.standardizedFileURL.path)
+            // 휴지통은 Locations 잎이라 materializedNode 순회 밖 — 실제 우클릭이 넘기는 trashNode를 그대로 쓴다 (TF_EMPTY_TRASH)
+            if PathPasteboard.normalized(trashNode.url.standardizedFileURL.path) == key { return trashNode }
+            return materializedNode(matching: key)
         }
         let menu = NSMenu()
         buildMenu(menu, item: item)
-        return menu.items.map { $0.isSeparatorItem ? "─" : $0.title }
+        return menu.items.map { $0.isSeparatorItem ? "─" : "\($0.title)\($0.isEnabled ? "" : "(비활성)")" }   // 목록 메뉴 로그와 같은 형식
     }
 
     /// TF_TREE_NETWORK — 네트워크 그룹 확장(Bonjour 시작) 후 자식 구성을 로그로 확인
@@ -768,6 +771,14 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         menu.addItem(.separator())
         menu.addItem(refresh)   // 탐색·클립보드와 성격이 달라 독립 구간 (디자이너)
         menu.addItem(.separator())
+        if (item as? FolderNode) === trashNode {   // 사이드바 휴지통 우클릭 = 비우기 (Finder 규약, 제작자 확정 2026-09-11)
+            let empty = NSMenuItem(title: L("Empty Trash…"), action: #selector(MainWindowController.emptyTrash(_:)),
+                                   keyEquivalent: "")   // target nil = 응답 체인(창 컨트롤러가 목록 컨트롤러로 중계)
+            empty.image = NSImage(systemSymbolName: "trash.slash", accessibilityDescription: L("Empty Trash…"))
+            empty.isEnabled = !TrashLocations.items.isEmpty   // autoenables가 꺼진 메뉴라 직접 판정
+            menu.addItem(empty)
+            menu.addItem(.separator())
+        }
 
         if item is FolderNode {
             if VolumeMonitor.shared.isEjectable(url) {   // 착탈식 볼륨 = 추출 (제작자 지시 2026-07-25)

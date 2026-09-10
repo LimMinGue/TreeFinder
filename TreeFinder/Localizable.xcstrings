@@ -2070,6 +2070,446 @@
           }
         }
       }
+    },
+    "Empty Trash…": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "휴지통 비우기…"
+          }
+        }
+      }
+    },
+    "Empty Trash": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "휴지통 비우기"
+          }
+        }
+      }
+    },
+    "Emptying Trash…": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "휴지통 비우는 중…"
+          }
+        }
+      }
+    },
+    "Are you sure you want to permanently erase the items in the Trash?": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "휴지통에 있는 항목을 영구적으로 지우겠습니까?"
+          }
+        }
+      }
+    },
+    "All items in the Trash will be deleted immediately. You can’t undo this action.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "휴지통의 모든 항목은 즉시 삭제됩니다. 이 동작은 실행 취소할 수 없습니다."
+          }
+        }
+      }
+    },
+    "New Terminal Tab": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "새 터미널 탭"
+          }
+        }
+      }
+    },
+    "Close Terminal Tab": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "터미널 탭 닫기"
+          }
+        }
+      }
+    },
+    "Find Next": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다음 찾기"
+          }
+        }
+      }
+    },
+    "Find Previous": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 찾기"
+          }
+        }
+      }
+    },
+    "Bigger Text": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "글자 크게"
+          }
+        }
+      }
+    },
+    "Smaller Text": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "글자 작게"
+          }
+        }
+      }
+    },
+    "Paste Path into Terminal": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "터미널에 경로 붙여넣기"
+          }
+        }
+      }
+    },
+    "Follow Shell Directory": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "셸의 폴더 따라가기"
+          }
+        }
+      }
+    },
+    "Scrollback": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "스크롤백"
+          }
+        }
+      }
+    },
+    "%@ lines": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@줄"
+          }
+        }
+      }
+    },
+    "Follow shell directory in file list": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "셸의 폴더를 파일 목록이 따라가기"
+          }
+        }
+      }
+    },
+    "New Window": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "새 윈도우"
+          }
+        }
+      }
+    },
+    "New Folder with Selection": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "선택 항목으로 새 폴더"
+          }
+        }
+      }
+    },
+    "New Folder With Items": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "항목이 있는 새 폴더"
+          }
+        }
+      }
+    },
+    "Home": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "홈"
+          }
+        }
+      }
+    },
+    "Desktop": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "데스크탑"
+          }
+        }
+      }
+    },
+    "Documents": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "문서"
+          }
+        }
+      }
+    },
+    "Downloads": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다운로드"
+          }
+        }
+      }
+    },
+    "Applications": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "응용 프로그램"
+          }
+        }
+      }
+    },
+    "Utilities": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "유틸리티"
+          }
+        }
+      }
+    },
+    "Computer": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터"
+          }
+        }
+      }
+    },
+    "iCloud Drive": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iCloud Drive"
+          }
+        }
+      }
+    },
+    "This Folder": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 폴더"
+          }
+        }
+      }
+    },
+    "This Mac": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 Mac"
+          }
+        }
+      }
+    },
+    "Show in Enclosing Folder": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "들어있는 폴더 열기"
+          }
+        }
+      }
+    },
+    "Always Open With %@": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "항상 %@(으)로 열기"
+          }
+        }
+      }
+    },
+    "An item named “%@” already exists in this location.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "같은 이름의 항목 “%@”이(가) 이미 이 위치에 있습니다."
+          }
+        }
+      }
+    },
+    "Do you want to keep both, or replace the existing item with the one you’re moving?": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "둘 다 유지하거나, 기존 항목을 옮기는 항목으로 대치하시겠습니까?"
+          }
+        }
+      }
+    },
+    "Do you want to merge the folders, keep both, or replace the existing folder?": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "폴더를 병합하거나, 둘 다 유지하거나, 기존 폴더를 대치하시겠습니까?"
+          }
+        }
+      }
+    },
+    "Keep Both": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "둘 다 유지"
+          }
+        }
+      }
+    },
+    "Replace": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대치"
+          }
+        }
+      }
+    },
+    "Skip": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "건너뛰기"
+          }
+        }
+      }
+    },
+    "Merge": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "병합"
+          }
+        }
+      }
+    },
+    "Apply to All": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "모두 적용"
+          }
+        }
+      }
+    },
+    "Copy Document Text": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "본문 텍스트 복사"
+          }
+        }
+      }
+    },
+    "Export as PDF": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDF로 내보내기"
+          }
+        }
+      }
+    },
+    "Exporting PDF…": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDF 내보내는 중…"
+          }
+        }
+      }
+    },
+    "Couldn't export “%@” as PDF.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“%@”을(를) PDF로 내보낼 수 없습니다."
+          }
+        }
+      }
+    },
+    "Couldn't read the document text.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "문서의 본문을 읽을 수 없습니다."
+          }
+        }
+      }
     }
   },
   "version": "1.0"
