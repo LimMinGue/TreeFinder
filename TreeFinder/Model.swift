@@ -397,6 +397,16 @@ enum DirectoryLister {
                    == "새이름 2.txt", "different file must still collide")
             assert((try? FileListViewController.posixRename(r, toName: "새이름.txt")) == nil,
                    "rename onto another existing file must still fail")
+            // 같은 inode라도 이름이 다르면 충돌 — 하드링크(=FAT 빈 파일 ino 공유와 같은 판정 경로)
+            let hard = tmp.appendingPathComponent("hard.txt")
+            try? fm.linkItem(at: r, to: hard)
+            assert((try? FileListViewController.posixRename(r, toName: "hard.txt")) == nil,
+                   "rename onto a hard-link sibling must fail")
+            // 심링크 자체의 이름이 링크 대상 이름과 대소문자만 같으면 충돌(lstat 미추종)
+            let link = tmp.appendingPathComponent("ln")
+            try? fm.createSymbolicLink(at: link, withDestinationURL: r)
+            assert((try? FileListViewController.posixRename(link, toName: "pms-1111.TXT")) == nil,
+                   "symlink must not take its target's name")
         } else {
             assertionFailure("case-only rename failed")
         }

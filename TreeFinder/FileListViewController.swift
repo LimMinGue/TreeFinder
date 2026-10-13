@@ -1823,7 +1823,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         return lstat(path, &info) == 0
     }
 
-    /// 두 경로가 같은 디렉터리 항목인가(dev+inode, 링크 미추종) — 대소문자·정규화만 다른 이름 판정용.
+    /// 두 경로가 같은 디렉터리 항목인가(dev+inode, 링크 미추종 — stat으로 바꾸면 심링크 대상 이름을 자기로 오판).
+    /// inode는 볼륨에 따라 고유하지 않다(FAT 빈 파일·하드링크) — 단독 사용 금지, posixRename처럼 이름 동치와 함께.
     nonisolated static func isSameEntry(_ a: String, _ b: String) -> Bool {
         var sa = stat(), sb = stat()
         return lstat(a, &sa) == 0 && lstat(b, &sb) == 0 && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino
@@ -1858,15 +1859,23 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     nonisolated static func posixRename(_ url: URL, toName newName: String) throws -> URL {
         let name = diskName(fromDisplay: newName)   // 표시 '/' → 디스크 ':' (제작자 지시 2026-07-23)
         let destPath = url.deletingLastPathComponent().path + "/" + name
-        // 링크 미추종(깨진 심링크 조용한 덮어쓰기 방지). 단, 대소문자 무시 볼륨(APFS 기본)에서 대소문자만 바꾸는 rename
-        // ("PMs-1111.txt"→"PMS-1111.txt")은 lstat이 자기 자신을 찾는다 — 같은 inode면 충돌 아님(제작자 제보 2026-10-13).
-        guard !nameIsTaken(atPath: destPath) || isSameEntry(url.path, destPath) else {
+        // 자기 자신(대소문자·정규화만 다른 이름)으로의 rename — 대소문자 무시 볼륨(APFS 기본)에서 "PMs"→"PMS"는 lstat이
+        // 자기 자신을 찾는다(제작자 제보 2026-10-13). 같은 inode만으론 부족: FAT(커널 msdosfs)는 빈 파일 전부 ino 999999999,
+        // 하드링크도 같은 ino라 서로 다른 이름끼리 통과→덮어쓰기(사후 검증 실측) → 이름 동치까지 요구.
+        let isSelf = url.lastPathComponent.compare(name, options: .caseInsensitive) == .orderedSame
+            && isSameEntry(url.path, destPath)
+        guard isSelf || !nameIsTaken(atPath: destPath) else {   // 링크 미추종(깨진 심링크 조용한 덮어쓰기 방지)
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteFileExistsError,
                           userInfo: [NSLocalizedDescriptionKey: L("An item with the same name already exists.")])
         }
         let rc = url.withUnsafeFileSystemRepresentation { src -> Int32 in
             guard let src else { return -1 }
-            return destPath.withCString { rename(src, $0) }
+            return destPath.withCString { dst in
+                if isSelf { return rename(src, dst) }   // RENAME_EXCL은 HFS+의 NFD→NFC·비ASCII 대소문자를 EEXIST로 거부(실측)
+                // RENAME_EXCL = 판정~실행 사이에 생긴 같은 이름 파일을 덮어쓰지 않음(TOCTOU). exFAT(FSKit)은 ENOTSUP → rename
+                let r = renamex_np(src, dst, UInt32(RENAME_EXCL))
+                return r == 0 || (errno != ENOTSUP && errno != EINVAL) ? r : rename(src, dst)
+            }
         }
         guard rc == 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
