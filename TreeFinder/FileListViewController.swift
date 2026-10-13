@@ -1823,6 +1823,12 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         return lstat(path, &info) == 0
     }
 
+    /// 두 경로가 같은 디렉터리 항목인가(dev+inode, 링크 미추종) — 대소문자·정규화만 다른 이름 판정용.
+    nonisolated static func isSameEntry(_ a: String, _ b: String) -> Bool {
+        var sa = stat(), sb = stat()
+        return lstat(a, &sa) == 0 && lstat(b, &sb) == 0 && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino
+    }
+
     nonisolated static func availableURL(for proposed: URL) -> URL {
         guard nameIsTaken(atPath: proposed.path) else { return proposed }
         let parent = proposed.deletingLastPathComponent()
@@ -1852,7 +1858,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     nonisolated static func posixRename(_ url: URL, toName newName: String) throws -> URL {
         let name = diskName(fromDisplay: newName)   // 표시 '/' → 디스크 ':' (제작자 지시 2026-07-23)
         let destPath = url.deletingLastPathComponent().path + "/" + name
-        guard !nameIsTaken(atPath: destPath) else {   // 링크 미추종(깨진 심링크 조용한 덮어쓰기 방지)
+        // 링크 미추종(깨진 심링크 조용한 덮어쓰기 방지). 단, 대소문자 무시 볼륨(APFS 기본)에서 대소문자만 바꾸는 rename
+        // ("PMs-1111.txt"→"PMS-1111.txt")은 lstat이 자기 자신을 찾는다 — 같은 inode면 충돌 아님(제작자 제보 2026-10-13).
+        guard !nameIsTaken(atPath: destPath) || isSameEntry(url.path, destPath) else {
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteFileExistsError,
                           userInfo: [NSLocalizedDescriptionKey: L("An item with the same name already exists.")])
         }

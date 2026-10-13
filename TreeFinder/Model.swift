@@ -387,6 +387,20 @@ enum DirectoryLister {
             assertionFailure("posixRename failed in selfTest")
         }
 
+        // 대소문자만 바꾸는 rename — 대소문자 무시 볼륨에서 '이미 존재' 오판 금지 (제작자 제보 2026-10-13)
+        let caseFile = tmp.appendingPathComponent("PMs-1111.txt")
+        fm.createFile(atPath: caseFile.path, contents: Data())
+        if let r = try? FileListViewController.posixRename(caseFile, toName: "PMS-1111.txt") {
+            assert((try? fm.contentsOfDirectory(atPath: tmp.path))?.contains("PMS-1111.txt") == true,
+                   "case-only rename not stored")
+            assert(FileListViewController.availableURL(for: tmp.appendingPathComponent("새이름.txt")).lastPathComponent
+                   == "새이름 2.txt", "different file must still collide")
+            assert((try? FileListViewController.posixRename(r, toName: "새이름.txt")) == nil,
+                   "rename onto another existing file must still fail")
+        } else {
+            assertionFailure("case-only rename failed")
+        }
+
         // '/'↔':' 이름 변환 + 슬래시 rename이 디스크에 ':'으로 저장되는지 (제작자 지시 2026-07-23 — Finder 규약)
         assert(FileListViewController.diskName(fromDisplay: "개인/가족") == "개인:가족", "diskName '/'→':' broken")
         assert(FileListViewController.displayName(fromDisk: "개인:가족") == "개인/가족", "displayName ':'→'/' broken")
