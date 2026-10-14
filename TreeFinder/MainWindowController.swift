@@ -607,6 +607,8 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { post(.leftMouseUp) }
     }
     func debugUndo() { listController?.undo(nil) }   // TF_UNDO_MOVE (A13)
+    func debugPane(_ index: Int) -> FileListViewController? { panes.indices.contains(index) ? panes[index] : nil }   // TF_CASE_FILES
+    func debugActivePaneIndex() -> Int { activePaneIndex }
     // TF_R1_* — 1라운드 검증 릴레이 (decisions §36)
     func debugPerformDrops(_ sources: [URL], into target: URL) { listController?.debugPerformDrop(sources, into: target) }
     func debugRevealFile(_ url: URL) { listController?.reveal(fileURL: url) }

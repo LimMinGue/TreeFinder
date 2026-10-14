@@ -903,6 +903,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 NSLog("R1_FILES newWindow windows %d → %d", before, NSApp.windows.filter { $0.isVisible }.count)
             }
         }
+        // TF_CASE_FILES=<픽스처 루트> → (TF_START_DIR=<루트> 병용, 픽스처: Case/Sub/inner · same/{a.txt,PMs-1111.txt})
+        // 소문자 경로 표기 교정 · 대소문자 다른 경로 드롭 가드 · 같은 폴더 복사 무시트 · rename/undo 선택 유지 ·
+        // undo 실패 표면화 · 듀얼 페인 폴더 대소문자 rename 표기 교정 (2026-10-13 사후 검증 후속)
+        if let rootPath = ProcessInfo.processInfo.environment["TF_CASE_FILES"] {
+            let root = URL(fileURLWithPath: rootPath), same = root.appendingPathComponent("same")
+            let at: (Double, @escaping () -> Void) -> Void = { delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) }
+            let pane0 = { wc.debugPane(0) }, pane1 = { wc.debugPane(1) }
+            func rename(_ name: String, to newName: String, start: Double) {
+                at(start) { wc.debugPane(wc.debugActivePaneIndex())?.debugSelectNamed(name); wc.debugRename()
+                            at(0.3) { NSLog("CASE renameEdit %@ → %@ %@", name, newName, wc.debugEditingState()) } }
+                at(start + 0.6) { wc.debugPane(wc.debugActivePaneIndex())?.debugSetEditingText(newName); wc.debugCommitEditing() }
+            }
+            at(1.0) { pane0()?.show(directory: root.appendingPathComponent("case/sub")) }
+            at(1.8) {
+                NSLog("CASE showLower dir=%@", wc.debugCurrentDirectory())
+                pane0()?.debugPerformDrop([root.appendingPathComponent("Case/Sub")],
+                                          into: root.appendingPathComponent("case/sub/inner"), forceCopy: true)   // 자기 하위 ⌥복사
+                pane0()?.debugPerformDrop([root.appendingPathComponent("Case/Sub/inner")],
+                                          into: root.appendingPathComponent("case/sub"), forceCopy: false)       // 같은 폴더 이동
+            }
+            at(3.0) {
+                NSLog("CASE afterDrops sheet=%@ sub=[%@] inner=[%@]", wc.window?.attachedSheet == nil ? "none" : "attached",
+                      Self.debugListing(root.appendingPathComponent("Case/Sub")), Self.debugListing(root.appendingPathComponent("Case/Sub/inner")))
+                pane0()?.show(directory: same)
+            }
+            at(4.0) { pane0()?.debugSelectNamed("a.txt"); pane0()?.debugCopyPaste() }
+            at(5.0) {
+                NSLog("CASE sameFolderCopy sheet=%@ same=[%@]", wc.window?.attachedSheet == nil ? "none" : "attached", Self.debugListing(same))
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-case-copy.png")
+            }
+            rename("PMs-1111.txt", to: "PMS-1111.txt", start: 5.2)
+            at(6.8) { NSLog("CASE afterRename same=[%@] selected=%@", Self.debugListing(same), wc.debugSelectedName()); wc.debugUndo() }
+            at(7.8) { NSLog("CASE afterUndo same=[%@] selected=%@", Self.debugListing(same), wc.debugSelectedName()) }
+            rename("PMs-1111.txt", to: "zz.txt", start: 8.0)
+            at(9.6) {
+                FileManager.default.createFile(atPath: same.appendingPathComponent("PMs-1111.txt").path, contents: Data("other".utf8))
+                wc.debugUndo()   // 원래 이름이 그새 생김 → 실패를 시트로 표면화해야 함
+            }
+            at(10.6) {
+                let sheet = Self.debugCaptureSheet(of: wc.window, to: "/tmp/treefinder-case-undofail.png")
+                NSLog("CASE undoFail sheet=%@ same=[%@]", sheet == nil ? "none" : "attached", Self.debugListing(same))
+                if let sheet { wc.window?.endSheet(sheet) }
+            }
+            at(11.2) { pane0()?.show(directory: root); wc.toggleDualPane(nil) }
+            at(12.2) { pane1()?.show(directory: root.appendingPathComponent("Case/Sub")) }
+            at(13.0) { pane0()?.onActivate?() }   // 합성 클릭은 큐 처리 시점이 선택 뒤로 밀려 선택을 지운다 — 활성 승격만 직접
+            rename("Case", to: "CASE", start: 13.6)
+            at(15.4) {
+                NSLog("CASE dualRename pane1=%@ active=%d root=[%@]", pane1()?.directory?.path ?? "nil",
+                      wc.debugActivePaneIndex(), Self.debugListing(root))
+                Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-case-dual.png")
+            }
+            // 출하 전 검증 반영분: 자기 안으로 붙여넣기 no-op · Foo/Foo 충돌 시트에 '대치' 없음 · 다른 행 선택 후 확정 시 그 선택 유지
+            func buttonTitles(_ view: NSView?) -> [String] {
+                guard let view else { return [] }
+                return ((view as? NSButton).map { [$0.title] } ?? []) + view.subviews.flatMap(buttonTitles)
+            }
+            at(16.0) { wc.toggleDualPane(nil); pane0()?.show(directory: root) }
+            at(16.8) { pane0()?.debugSelectNamed("same"); pane0()?.debugCopy(); pane0()?.show(directory: same) }
+            at(17.6) { pane0()?.debugPaste() }
+            at(18.6) {
+                NSLog("CASE pasteIntoSelf sheet=%@ same=[%@]", wc.window?.attachedSheet == nil ? "none" : "attached", Self.debugListing(same))
+                pane0()?.show(directory: root)
+            }
+            at(19.4) { pane0()?.debugPerformDrop([root.appendingPathComponent("Pkg/Pkg")], into: root, forceCopy: false) }   // Foo/Foo 이동
+            at(20.4) {
+                let sheet = Self.debugCaptureSheet(of: wc.window, to: "/tmp/treefinder-case-foofoo.png")
+                NSLog("CASE fooFoo sheet=%@ buttons=[%@]", sheet == nil ? "none" : "attached", buttonTitles(sheet?.contentView).joined(separator: " | "))
+                Self.debugClickButton(in: sheet?.contentView, titled: L("Skip"))
+            }
+            at(21.2) { NSLog("CASE fooFooAfterSkip root=[%@]", Self.debugListing(root.appendingPathComponent("Pkg"))); pane0()?.show(directory: same) }
+            at(22.0) { pane0()?.debugSelectNamed("a.txt"); wc.debugRename() }
+            at(22.6) { pane0()?.debugSetEditingText("a-renamed.txt"); pane0()?.debugSelectNamed("zz.txt"); wc.debugCommitEditing() }
+            at(23.6) { NSLog("CASE clickCommit same=[%@] selected=%@", Self.debugListing(same), wc.debugSelectedName()) }
+        }
         // TF_R1_TERMINAL=<픽스처 루트> → 터미널 포커스 메뉴 검증·세션 복원·스크롤백·⌘=·찾기 바·경로 ⌘클릭·cd 따라가기·명령 뒤 트리 갱신
         if let rootPath = ProcessInfo.processInfo.environment["TF_R1_TERMINAL"] {
             let root = URL(fileURLWithPath: rootPath)

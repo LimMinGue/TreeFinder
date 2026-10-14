@@ -1660,10 +1660,15 @@ extension PreviewViewController: LocalProcessTerminalViewDelegate {
     }
 
     /// 호스트 이름 비교는 첫 라벨만 — 셸은 짧은 이름(`mac`), ProcessInfo는 `mac.local`을 주는 일이 흔하다.
+    /// 셸(zsh)의 `$HOST`는 `gethostname()`이라 Tailscale 등이 바꾸면 ProcessInfo(Bonjour 이름)와 다르다 — 둘 다 이 맥
+    /// (2026-10-14 실측: `macbook-pro-m5.tailc002f.ts.net` vs `limmingue-macbook-pro-m5.local` → 원격 오판, cd 따라가기 무동작).
+    /// 매번 조회: 실행 중 Tailscale 연결/해제로 바뀐다(gethostname은 syscall 1회).
     private static func isThisMac(_ host: String?) -> Bool {
         guard let host, !host.isEmpty, host != "localhost" else { return true }
         func label(_ name: String) -> String { name.split(separator: ".").first?.lowercased() ?? "" }
-        return label(host) == label(ProcessInfo.processInfo.hostName)
+        var buffer = [CChar](repeating: 0, count: 256)
+        gethostname(&buffer, buffer.count)
+        return [String(cString: buffer), ProcessInfo.processInfo.hostName].map(label).contains(label(host))
     }
 
     /// 셸이 끝나면(`exit`·`logout`·크래시) 탭도 함께 닫는다 (제작자 제보 2026-07-21 — 죽은 탭이 남던 문제).

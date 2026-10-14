@@ -2401,6 +2401,16 @@
         }
       }
     },
+    "The item you’re moving is the existing item or is inside it, so it can’t be replaced.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "옮기려는 항목이 기존 항목 자체이거나 그 안에 있어 대치할 수 없습니다."
+          }
+        }
+      }
+    },
     "Do you want to merge the folders, keep both, or replace the existing folder?": {
       "localizations": {
         "ko": {

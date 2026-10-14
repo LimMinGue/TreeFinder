@@ -39,9 +39,12 @@ final class VolumeMonitor {
     /// 보면 `/Volumes/공유/폴더`가 통과해 버린다.
     func isNonLocal(_ url: URL) -> Bool {
         let path = url.standardizedFileURL.path
+        // 대소문자 무시 — /Volumes는 대소문자 무시 볼륨이라 소문자 입력('/volumes/nas')도 같은 마운트다.
+        // 구분하면 그 경로가 로컬로 오판돼 메인 스레드 stat이 SMB로 나간다(§3, 출하 전 검증)
         return nonLocalRoots.contains { root in
             let rootPath = root.path
-            return path == rootPath || path.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/")
+            return path.caseInsensitiveCompare(rootPath) == .orderedSame
+                || path.range(of: rootPath.hasSuffix("/") ? rootPath : rootPath + "/", options: [.anchored, .caseInsensitive]) != nil
         }
     }
 

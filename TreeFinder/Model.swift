@@ -212,6 +212,25 @@ enum DirectoryLister {
         return target
     }
 
+    /// 입력 표기의 대소문자를 디스크 표기로 맞춘다 — 대소문자 무시 볼륨에선 ⇧⌘G 소문자 입력·셸 `$PWD`·대소문자만
+    /// 바꾼 폴더의 옛 경로도 그대로 열리는데, 그 표기가 FSEvents 필터·드롭 가드·트리 reveal의 문자열 비교를 어긋나게 한다
+    /// (2026-10-13 사후 검증). 구성요소별 `.nameKey`(getattrlist — 링크 미추종) = **심링크·/private 치환 없이 대소문자만**.
+    /// 정규화(NFC/NFD)만 다른 구성요소는 입력 그대로 둔다. 비로컬은 건드리지 않는다(§3 죽은 마운트 — 메모리 스냅숏 판정).
+    /// ponytail: 구성요소당 getattrlist 1회(7단 경로 약 0.13ms 실측) — 폴더 진입 1회용, 대량 경로 비교엔 쓰지 말 것.
+    @MainActor static func diskCased(_ url: URL) -> URL {
+        guard url.isFileURL, !VolumeMonitor.shared.isNonLocal(url) else { return url }
+        var cased = URL(fileURLWithPath: "/")
+        for component in url.pathComponents.dropFirst() {
+            let next = cased.appendingPathComponent(component, isDirectory: true)   // isDirectory 생략 시 구성요소마다 stat
+            let stored = (try? next.resourceValues(forKeys: [.nameKey]))?.name ?? component
+            // 대소문자 무시로 같아야만 채택 — 마운트 지점의 nameKey는 볼륨 이름이라('SSD 1' 폴더 → 'SSD') 경로가 바뀔 수 있다
+            let differsByCase = stored.caseInsensitiveCompare(component) == .orderedSame
+                && PathPasteboard.normalized(stored) != PathPasteboard.normalized(component)
+            cased = cased.appendingPathComponent(differsByCase ? stored : component, isDirectory: true)
+        }
+        return cased.path == url.path ? url : URL(fileURLWithPath: cased.path, isDirectory: url.hasDirectoryPath)
+    }
+
     /// 심링크가 가리키는 **후보** 경로 — readlink 체인만 돌고 대상은 **건드리지 않는다**(stat 0).
     /// 링크가 아니거나 자기 자신으로 돌아오면 nil.
     /// 죽은 네트워크 마운트를 가리킬 수 있는 자리(동기·메인 스레드 열거)에서는 **이걸로 먼저 판정**하고,

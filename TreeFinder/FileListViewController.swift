@@ -306,6 +306,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         do {
             let renamed = try Self.posixRename(item.url, toName: newName)
             registerRenameUndo(current: renamed, originalName: item.name)
+            didRename(to: renamed, isDirectory: item.isDirectory)
         } catch {
             if iconItem == nil { field.stringValue = Self.displayName(fromDisk: item.name) }
             reportError(error)
@@ -315,12 +316,24 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     private func registerRenameUndo(current: URL, originalName: String) {
         fileUndoManager.registerUndo(withTarget: self) { target in
-            if let back = try? Self.posixRename(current, toName: originalName) {
+            do {   // 실패(그새 같은 이름이 생김 등)를 삼키지 않는다 — 파일 조작 실패 표면화 규약(2026-10-13 사후 검증)
+                let back = try Self.posixRename(current, toName: originalName)
                 target.registerRenameUndo(current: back, originalName: current.lastPathComponent)
+                target.didRename(to: back, isDirectory: Self.isDirectory(back.path))
+            } catch {
+                target.reportError(error)
             }
             target.reloadCurrentDirectory()
         }
         fileUndoManager.setActionName(L("Rename"))
+    }
+
+    /// 이름 변경 직후 공통 — 바뀐 항목을 선택 유지(Finder 규약: 옛 URL 기준 복원이라 선택이 풀리던 것)하고,
+    /// 폴더면 다른 탭·페인에 알린다: 대소문자만 바꾼 폴더 안을 보던 페인은 옛 표기로 계속 열려 있어
+    /// FSEvents가 끊긴다(rename 후 이벤트 0건 실측) → 각 페인이 디스크 표기로 다시 연다(directoryRenamed 옵저버).
+    private func didRename(to renamed: URL, isDirectory: Bool) {
+        pendingSelectURL = renamed   // reloadCurrentDirectory 완료부의 beginPendingSelect가 소비
+        if isDirectory { NotificationCenter.default.post(name: .directoryRenamed, object: nil) }
     }
 
     var onSelect: ((FileItem?) -> Void)?
@@ -486,6 +499,18 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         // 옵저버 토큰은 보관 후 deinit에서 해제 — 페인(듀얼 페인 토글·창 닫기)마다 누적되던 누수 차단(2026-09-05 A12)
         observers.append(NotificationCenter.default.addObserver(forName: .settingsChanged, object: nil, queue: .main) {
             [weak self] _ in self?.reloadActiveView()   // 날짜 포맷·확장자 표시 등 즉시 반영
+        })
+        // 다른 페인에서 폴더 이름 변경 → 이 페인의 경로 표기가 디스크와 대소문자만 달라졌으면 다시 연다(didRename)
+        observers.append(NotificationCenter.default.addObserver(forName: .directoryRenamed, object: nil, queue: .main) {
+            [weak self] _ in
+            // 인라인 이름 변경 중이면 건너뜀 — 재적재(reloadData)가 편집을 확정해 입력 중 이름이 **밀린 행의 다른 파일**에
+            // 붙는다(출하 전 검증 실측). 표기 교정은 다음 폴더 이동 때 show가 한다.
+            guard let self, let directory = self.directory, directory.isFileURL,
+                  self.editingRow == nil, self.editingIconItem == nil,
+                  DirectoryLister.diskCased(directory).path != directory.path else { return }
+            self.pendingSelectURL = self.selectedURLs().first.map(DirectoryLister.diskCased)   // 선택 이월(표기 교정 후 경로)
+            self.navigatingViaHistory = true   // 표기 교정일 뿐 — 히스토리에 쌓지 않음
+            self.show(directory: directory, activate: false)
         })
         // 네트워크 브라우즈 중 발견 결과 증감 → 목록 재구성 (워게임 network_browse)
         observers.append(NotificationCenter.default.addObserver(forName: .networkHostsChanged, object: nil, queue: .main) {
@@ -1375,15 +1400,17 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     private(set) var debugShowCount = 0   // TF_TREE_CLICK — 트리 클릭 1회 = show 1회여야(A16 이중 발화 회귀)
     #endif
 
-    func show(directory: URL) {
+    /// activate=false: 사용자 조작이 아닌 표기 교정(directoryRenamed)용 — 듀얼 페인 활성을 빼앗지 않는다
+    func show(directory: URL, activate: Bool = true) {
         #if DEBUG
         debugShowCount += 1
         #endif
         // 심링크 폴더는 여기서 **한 번** 대상으로 해석한다(Finder 규약 — decisions §32). 이 한 줄이
         // 목록 리스팅·FSEvents 감시 경로·크기 캐시 키·검색 스코프·탭 세션 저장까지 전부 실경로로 정렬한다
         // (self.directory 대입은 앱 통틀어 이 함수 하나뿐 = 단일 초크포인트).
-        let directory = DirectoryLister.resolvedFolder(directory)
-        onActivate?()
+        // + 대소문자를 디스크 표기로(⇧⌘G 소문자·셸 $PWD — FSEvents 필터·드롭 가드·트리 reveal이 문자열 비교라 어긋남, 2026-10-13)
+        let directory = DirectoryLister.diskCased(DirectoryLister.resolvedFolder(directory))
+        if activate { onActivate?() }
         if !navigatingViaHistory, let old = self.directory, old != directory {
             backStack.append(old)
             forwardStack.removeAll()
@@ -1405,7 +1432,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             return
         }
         restartWatcher(for: directory)
-        view.window?.title = FileManager.default.displayName(atPath: directory.path)
+        if activate { view.window?.title = FileManager.default.displayName(atPath: directory.path) }   // 비활성 페인 표기 교정이 제목을 덮지 않게
         onDirectoryChange?(directory)
         loadTask = Task { [weak self] in
             var listed: [FileItem] = []
@@ -1957,6 +1984,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         let targetKey = Self.dropKey(directory)   // 같은 폴더 판정은 dropKey(§3 경로 비교 단일화) — URL == 금지
         let transfers = urls
             .filter { !(isMove && Self.dropKey($0.deletingLastPathComponent()) == targetKey) }   // 같은 폴더 이동 = no-op
+            .filter { let key = Self.dropKey($0); return key != targetKey && !targetKey.hasPrefix(key + "/") }   // 자기 안으로 = no-op(드롭과 같은 가드 — 없으면 중첩 폭주, 출하 전 검증)
             .map { Transfer(source: $0, target: directory, isMove: isMove) }
         resolveTransfers(transfers) { [weak self] items in
             guard let self else { return }
@@ -1995,12 +2023,24 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                     items.append(transferItem(source: t.source, into: t.target, isMove: t.isMove))
                     continue
                 }
+                // 충돌 상대가 원본 자신(같은 폴더로 복사·표기만 다른 같은 폴더) — 묻지 않는다. 시트를 띄우면 '대치'가
+                // 원본을 휴지통으로 보내고 복사는 실패했다(2026-10-13 사후 검증 실측). 복사 = ⌘D와 같은 "이름 copy", 이동 = no-op.
+                if Self.isSameFolder(t.source.deletingLastPathComponent(), t.target) {
+                    if !t.isMove { items.append(duplicateItem(t.source, action: L("Copy"))) }
+                    continue
+                }
                 let bothFolders = Self.isDirectory(t.source.path) && Self.isDirectory(dest.path)
+                // 대치 불가: 충돌 상대가 원본을 품은 상위 폴더(압축 해제로 흔한 Foo/Foo)이거나 원본(파일 링크)이 가리키는
+                // 바로 그 항목이면, 대치가 원본까지 휴지통으로 보내고 실패한다(출하 전 검증 실측 — Finder도 거부).
+                let sourceKey = Self.dropKey(t.source), destKey = Self.dropKey(dest)
+                let canReplace = sourceKey != destKey && !sourceKey.hasPrefix(destKey + "/")
                 let choice: ConflictChoice
-                if let applyAll, !(applyAll == .merge && !bothFolders) {   // "모두 병합"은 폴더 쌍에만 — 파일 충돌은 다시 묻는다
+                if let applyAll, !(applyAll == .merge && !bothFolders),   // "모두 병합"은 폴더 쌍에만 — 파일 충돌은 다시 묻는다
+                   !(applyAll == .replace && !canReplace) {               // "모두 대치"도 대치 불가 항목은 다시 묻는다
                     choice = applyAll
                 } else {
-                    guard let (picked, all) = await askConflict(dest: dest, bothFolders: bothFolders) else { return }
+                    guard let (picked, all) = await askConflict(dest: dest, bothFolders: bothFolders, canReplace: canReplace)
+                    else { return }
                     choice = picked
                     if all { applyAll = picked }
                 }
@@ -2022,16 +2062,19 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     /// 충돌 시트 — 기본(Return) = 둘 다 유지/병합(안전), 대치는 파괴 스타일, Esc = 취소. "모두 적용"은 억제 버튼 자리를 재사용.
-    private func askConflict(dest: URL, bothFolders: Bool) async -> (ConflictChoice, Bool)? {
+    private func askConflict(dest: URL, bothFolders: Bool, canReplace: Bool) async -> (ConflictChoice, Bool)? {
         guard let window = view.window else { return nil }
         return await withCheckedContinuation { continuation in
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = String(format: L("An item named “%@” already exists in this location."), dest.lastPathComponent)
-            alert.informativeText = bothFolders
+            alert.informativeText = !canReplace
+                ? L("The item you’re moving is the existing item or is inside it, so it can’t be replaced.")
+                : bothFolders
                 ? L("Do you want to merge the folders, keep both, or replace the existing folder?")
                 : L("Do you want to keep both, or replace the existing item with the one you’re moving?")
-            let choices: [ConflictChoice] = bothFolders ? [.merge, .keepBoth, .replace, .skip] : [.keepBoth, .replace, .skip]
+            let choices: [ConflictChoice] = (bothFolders ? [.merge, .keepBoth, .replace, .skip] : [.keepBoth, .replace, .skip])
+                .filter { $0 != .replace || canReplace }
             for choice in choices {
                 let title: String
                 switch choice {
@@ -2098,18 +2141,28 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
     }
 
+    /// 두 폴더가 같은 디렉터리인가(dev+inode, 링크 추종) — 표기(대소문자·심링크·/private) 무관.
+    /// 폴더 inode는 FAT에서도 고유(시작 클러스터)라 파일과 달리 단독 판정 가능(빈 파일 ino 공유는 파일 한정, decisions §38).
+    nonisolated static func isSameFolder(_ a: URL, _ b: URL) -> Bool {
+        var sa = stat(), sb = stat()
+        return stat(a.path, &sa) == 0 && stat(b.path, &sb) == 0 && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino
+    }
+
+    /// 같은 폴더에 사본 한 건 — "이름 copy"(+충돌 회피). ⌘D 복제와 같은 폴더로의 복사 공용(Finder 규약)
+    private func duplicateItem(_ url: URL, action: String) -> FileOperationEngine.Item {
+        FileOperationEngine.Item(name: url.lastPathComponent) { [weak self] in
+            let ext = url.pathExtension
+            let base = ext.isEmpty ? url.lastPathComponent : url.deletingPathExtension().lastPathComponent
+            let proposedName = ext.isEmpty ? "\(base) copy" : "\(base) copy.\(ext)"
+            let dest = Self.availableURL(for: url.deletingLastPathComponent().appendingPathComponent(proposedName))
+            try FileManager.default.copyItem(at: url, to: dest)
+            return { self?.registerUndoCreated(dest, action: action) }
+        }
+    }
+
     @objc func duplicateSelected(_ sender: Any?) {
         guard canModifyHere else { return }   // 네트워크 브라우즈·휴지통 안 (A10·A19)
-        let items = selectedURLs().map { url in
-            FileOperationEngine.Item(name: url.lastPathComponent) { [weak self] in
-                let ext = url.pathExtension
-                let base = ext.isEmpty ? url.lastPathComponent : url.deletingPathExtension().lastPathComponent
-                let proposedName = ext.isEmpty ? "\(base) copy" : "\(base) copy.\(ext)"
-                let dest = Self.availableURL(for: url.deletingLastPathComponent().appendingPathComponent(proposedName))
-                try FileManager.default.copyItem(at: url, to: dest)
-                return { self?.registerUndoCreated(dest, action: L("Duplicate")) }
-            }
-        }
+        let items = selectedURLs().map { duplicateItem($0, action: L("Duplicate")) }
         operationEngine.run(title: L("Duplicating items…"), items: items, in: view) { [weak self] _ in
             self?.reloadCurrentDirectory()
         }
@@ -2358,7 +2411,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 if self.viewStyle == .columns { self.reloadBrowser() }
             }
             self.beginPendingRename()   // 새 폴더 생성 직후 이름변경 진입 (제작자 지시 2026-07-23)
-            self.beginPendingSelect()
+            // 리스트는 프로그램 선택도 델리게이트가 미리보기·상태바를 갱신하지만 컬렉션 뷰는 아니다(실측) — 아이콘·갤러리만 직접
+            if self.beginPendingSelect(), self.viewStyle != .list { self.selectionDidSync() }
         }
     }
 
@@ -2398,12 +2452,17 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     /// 폴더 이동 후 예약된 항목 선택(리스트·아이콘·갤러리 공통) — 선택이 미리보기·경로 바를 함께 갱신한다(onSelect)
-    private func beginPendingSelect() {
-        guard let url = pendingSelectURL else { return }
+    /// 그새 사용자가 고른 선택이 있으면 덮지 않는다 — 다른 행 클릭으로 이름 변경을 확정하면 선택이 되돌아가던 것(출하 전 검증).
+    /// 폴더 이동·검색 경로는 rebuildItems가 선택을 비운 뒤라 영향 없음. 선택했으면 true.
+    @discardableResult
+    private func beginPendingSelect() -> Bool {
+        guard let url = pendingSelectURL else { return false }
         pendingSelectURL = nil
+        guard activeSelectionIndexes().isEmpty else { return false }
         let target = url.standardizedFileURL.path
-        guard let row = items.firstIndex(where: { $0.url.standardizedFileURL.path == target }) else { return }
+        guard let row = items.firstIndex(where: { $0.url.standardizedFileURL.path == target }) else { return false }
         setActiveSelection(IndexSet(integer: row), scrollToFirst: true)
+        return true
     }
 
     /// 파일 URL을 목록에서 드러낸다 — 폴더면 진입, 파일이면 부모로 이동 후 선택 (터미널 경로 ⌘클릭·검색 결과, decisions §36)
@@ -2420,7 +2479,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     /// 셸 cd 따라가기 수신 — 같은 폴더면 no-op(OSC 7은 프롬프트마다 온다), 심링크 표기 차이는 resolvedFolder로 흡수
     func followShellDirectory(_ url: URL) {
-        let resolved = DirectoryLister.resolvedFolder(url)
+        let resolved = DirectoryLister.diskCased(DirectoryLister.resolvedFolder(url))   // show()와 같은 표기로 비교(대소문자 포함)
         guard resolved.standardizedFileURL.path != directory?.standardizedFileURL.path,
               !VolumeMonitor.shared.isNonLocal(resolved) else { return }
         show(directory: url)
@@ -3084,11 +3143,17 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         return true
     }
 
-    /// 드롭 가드 비교 키(규칙 4 — performDrop·runStackDrop 공용): 심링크 해석(§32) + 표준화 + NFC.
-    /// 셋 다 필요하다 — 링크/실경로 표기 차이는 "같은 폴더 no-op"과 "자기 하위 금지"를 조용히 무력화하고,
-    /// 그 결과가 파일 개명(a.txt → a 2.txt)이나 중첩 폴더 폭주로 나타난다(실측).
+    /// 드롭 가드 비교 키(규칙 4 — performDrop·runStackDrop·paste 공용): 심링크 해석(§32) + 표준화 + NFC + 대소문자.
+    /// 넷 다 필요하다 — 링크/실경로·대소문자 표기 차이는 "같은 폴더 no-op"과 "자기 하위 금지"를 조용히 무력화하고,
+    /// 그 결과가 파일 개명(a.txt → a 2.txt)이나 중첩 폴더 폭주로 나타난다(실측 — 대소문자는 2026-10-13 ⌥복사 95단).
+    /// 로컬은 realpath(링크·/private·대소문자 전부 디스크 표기, 경로당 약 11µs 실측) — 비교 전용 키라 표시 경로와 달라도 된다.
+    /// 비로컬은 stat 금지(§3 죽은 마운트)라 종전 키 — 네트워크 공유의 대소문자 차이는 ponytail 한계.
     private static func dropKey(_ url: URL) -> String {
-        PathPasteboard.normalized(DirectoryLister.resolvedFolder(url).standardizedFileURL.path)
+        if !VolumeMonitor.shared.isNonLocal(url), let real = realpath(url.path, nil) {
+            defer { free(real) }
+            return PathPasteboard.normalized(String(cString: real))
+        }
+        return PathPasteboard.normalized(DirectoryLister.resolvedFolder(url).standardizedFileURL.path)
     }
 
     private func sameVolume(_ a: URL, _ b: URL) -> Bool {
@@ -3172,6 +3237,18 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     func debugPerformDrop(_ sources: [URL], into target: URL) {
         performDrop(sources, into: target, forceCopy: false)
     }
+    /// TF_CASE_FILES — 대소문자 표기·같은 폴더 복사·rename 후속 실측(2026-10-13 사후 검증 후속)
+    func debugPerformDrop(_ sources: [URL], into target: URL, forceCopy: Bool) {
+        performDrop(sources, into: target, forceCopy: forceCopy)
+    }
+    func debugSelectNamed(_ name: String) {
+        guard let row = items.firstIndex(where: { $0.name == name }) else { return }
+        setActiveSelection(IndexSet(integer: row), scrollToFirst: true)
+    }
+    func debugCopyPaste() { copy(nil); paste(nil) }
+    func debugCopy() { copy(nil) }
+    func debugPaste() { paste(nil) }
+    func debugSetEditingText(_ text: String) { (view.window?.firstResponder as? NSTextView)?.string = text }
 
     /// TF_SYMLINK — 현재 목록 항목 이름(리스팅 성공 여부 실측)
     func debugItemNames() -> [String] { items.map(\.name) }
@@ -3486,4 +3563,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                     stackSource: draggingInfo.draggingSource as? DropStackView)
         return true
     }
+}
+
+extension Notification.Name {
+    /// 폴더 이름이 바뀜(이름 변경·그 undo) — 대소문자만 바뀐 폴더 안을 보던 페인의 표기 교정용
+    static let directoryRenamed = Notification.Name("TFDirectoryRenamed")
 }
