@@ -967,16 +967,192 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 NSLog("CASE pasteIntoSelf sheet=%@ same=[%@]", wc.window?.attachedSheet == nil ? "none" : "attached", Self.debugListing(same))
                 pane0()?.show(directory: root)
             }
-            at(19.4) { pane0()?.debugPerformDrop([root.appendingPathComponent("Pkg/Pkg")], into: root, forceCopy: false) }   // Foo/Foo 이동
-            at(20.4) {
-                let sheet = Self.debugCaptureSheet(of: wc.window, to: "/tmp/treefinder-case-foofoo.png")
-                NSLog("CASE fooFoo sheet=%@ buttons=[%@]", sheet == nil ? "none" : "attached", buttonTitles(sheet?.contentView).joined(separator: " | "))
-                Self.debugClickButton(in: sheet?.contentView, titled: L("Skip"))
+            // 출하 전 검증(2026-10-19) 반영: 잠긴 파일 복사 대치 · Foo/Foo+형제 동시 이동 · 잠긴 안쪽 폴더 복사 대치
+            func hidden(_ dir: String) -> String {
+                ((try? FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent(dir).path)) ?? [])
+                    .filter { $0.hasPrefix(".tf-replace") }.joined(separator: ",")
             }
-            at(21.2) { NSLog("CASE fooFooAfterSkip root=[%@]", Self.debugListing(root.appendingPathComponent("Pkg"))); pane0()?.show(directory: same) }
-            at(22.0) { pane0()?.debugSelectNamed("a.txt"); wc.debugRename() }
-            at(22.6) { pane0()?.debugSetEditingText("a-renamed.txt"); pane0()?.debugSelectNamed("zz.txt"); wc.debugCommitEditing() }
-            at(23.6) { NSLog("CASE clickCommit same=[%@] selected=%@", Self.debugListing(same), wc.debugSelectedName()) }
+            func locked(_ path: String) -> Int {
+                ((try? root.appendingPathComponent(path).resourceValues(forKeys: [.isUserImmutableKey]))?.isUserImmutable ?? false) ? 1 : 0
+            }
+            // 고정 지연은 부하에서 시트·완료를 놓친다(2026-10-19 실측) — 조건 폴링(0.2초, 상한 10초)으로 순차 진행
+            func poll(_ cond: @escaping () -> Bool, _ then: @escaping () -> Void, tries: Int = 50) {
+                if cond() || tries == 0 { then(); return }
+                at(0.2) { poll(cond, then, tries: tries - 1) }
+            }
+            func replaceViaSheet(_ sources: [String], into target: String, copy: Bool, done: @escaping () -> Bool, log: @escaping () -> Void,
+                                 next: @escaping () -> Void) {
+                pane0()?.debugPerformDrop(sources.map(root.appendingPathComponent), into: target.isEmpty ? root : root.appendingPathComponent(target),
+                                          forceCopy: copy)
+                poll({ wc.window?.attachedSheet != nil }) {
+                    at(0.6) {   // 시트 등장 애니메이션 뒤 클릭
+                        Self.debugClickButton(in: wc.window?.attachedSheet?.contentView, titled: L("Replace"))
+                        poll(done) { at(0.4) { log(); next() } }
+                    }
+                }
+            }
+            func exists(_ path: String) -> Bool { FileManager.default.fileExists(atPath: root.appendingPathComponent(path).path) }
+            func rest() {
+                // 두 번째 사본 번호 · 점 있는 폴더명 사본
+                at(0.0) { pane0()?.debugSelectNamed("a-renamed.txt"); pane0()?.debugCopyPaste() }
+                at(0.8) { pane0()?.debugSelectNamed("a-renamed.txt"); pane0()?.debugCopyPaste() }
+                at(1.6) { NSLog("CASE copyNames same=[%@]", Self.debugListing(same)); pane0()?.show(directory: root.appendingPathComponent("dot")) }
+                at(2.4) { pane0()?.debugSelectNamed("v1.2"); pane0()?.debugCopyPaste() }
+                at(3.2) { pane0()?.debugSelectNamed("v1.2"); pane0()?.debugCopyPaste() }
+                at(4.0) { NSLog("CASE dottedFolder dot=[%@]", Self.debugListing(root.appendingPathComponent("dot"))) }
+                // 원본이 충돌 상대를 가리키는 가상본 → 대치 = 안내 후 건너뜀
+                at(4.2) { pane0()?.debugPerformDrop([root.appendingPathComponent("L2/target.txt")], into: root.appendingPathComponent("Lnk"), forceCopy: false) }
+                at(5.2) { Self.debugClickButton(in: wc.window?.attachedSheet?.contentView, titled: L("Replace")) }
+                at(6.0) {
+                    NSLog("CASE aliasReplace notice=%@", wc.window?.attachedSheet == nil ? "none" : "attached")
+                    at(0.8) {   // 등장 애니메이션 뒤 캡처(즉시 캡처는 빈 화면)
+                        let sheet = Self.debugCaptureSheet(of: wc.window, to: "/tmp/treefinder-case-alias.png")
+                        if let sheet { wc.window?.endSheet(sheet) }
+                    }
+                }
+                at(7.0) { NSLog("CASE aliasAfter lnk=[%@] l2=[%@]", Self.debugListing(root.appendingPathComponent("Lnk")),
+                                 (try? FileManager.default.destinationOfSymbolicLink(atPath: root.appendingPathComponent("L2/target.txt").path)) ?? "링크없음") }
+                // 충돌 상대가 원본을 가리키는 링크 → 묻지 않고 놓은 폴더에 둘 다 유지
+                at(7.2) { pane0()?.debugPerformDrop([root.appendingPathComponent("Src2/dir")], into: root.appendingPathComponent("T2"), forceCopy: true) }
+                at(8.4) { NSLog("CASE linkToSource sheet=%@ t2=[%@]", wc.window?.attachedSheet == nil ? "none" : "attached",
+                                 ((try? FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("T2").path)) ?? []).sorted().joined(separator: ", ")) }
+                at(8.7) {
+                    replaceViaSheet(["srcL/lk.txt"], into: "dstL", copy: true,
+                                    done: { (try? String(contentsOf: root.appendingPathComponent("dstL/lk.txt"), encoding: .utf8))?.hasPrefix("NEW") == true },
+                                    log: { NSLog("CASE lockedCopy dstL=[%@] locked=%d hidden=[%@]", Self.debugListing(root.appendingPathComponent("dstL")),
+                                                 locked("dstL/lk.txt"), hidden("dstL")) }) {
+                        replaceViaSheet(["Pk2/Pk2", "Pk2/sib.txt"], into: "", copy: false,
+                                        done: { exists("Pk2/p.txt") && exists("sib.txt") },
+                                        log: { NSLog("CASE fooFooSibling pk2=[%@] sib=%@ hidden=[%@]", Self.debugListing(root.appendingPathComponent("Pk2")),
+                                                     exists("sib.txt") ? "root" : "없음", hidden("")) }) {
+                            replaceViaSheet(["Pk3/Pk3"], into: "", copy: true,
+                                            done: { exists("Pk3/p.txt") },
+                                            log: { NSLog("CASE lockedFooFooCopy pk3=[%@] locked=%d hidden=[%@]",
+                                                         Self.debugListing(root.appendingPathComponent("Pk3")), locked("Pk3"), hidden("")) }) {
+                                NSLog("CASE extraDone")
+                                // 원본 가상본이 충돌 상대 '안'을 가리킴 → 대치 = 안내 후 건너뜀(실체 보존)
+                                pane0()?.debugPerformDrop([root.appendingPathComponent("Z2/Foo")], into: root.appendingPathComponent("X2"), forceCopy: false)
+                                poll({ wc.window?.attachedSheet != nil }) { at(0.6) {
+                                    Self.debugClickButton(in: wc.window?.attachedSheet?.contentView, titled: L("Replace"))
+                                    at(1.0) {
+                                        let notice = wc.window?.attachedSheet
+                                        if let notice { Self.debugCaptureSheet(of: wc.window, to: "/tmp/treefinder-case-alias-inside.png"); wc.window?.endSheet(notice) }
+                                        at(0.8) {
+                                            NSLog("CASE aliasInside notice=%@ x2=[%@] z2link=%@", notice == nil ? "none" : "attached",
+                                                  Self.debugListing(root.appendingPathComponent("X2")),
+                                                  (try? FileManager.default.destinationOfSymbolicLink(atPath: root.appendingPathComponent("Z2/Foo").path)) ?? "없음")
+                                            // 남은 선택 매핑: r1→r1-old(다른 행 클릭 확정) → r2를 r1로(Enter) → 재적재 후에도 선택 = r1(옛 r2)
+                                            pane0()?.show(directory: root.appendingPathComponent("rp"))
+                                            at(0.8) { pane0()?.debugSelectNamed("r1.txt"); wc.debugRename() }
+                                            at(1.4) { pane0()?.debugSetEditingText("r1-old.txt"); pane0()?.debugSelectNamed("r2.txt"); wc.debugCommitEditing() }
+                                            at(2.4) { pane0()?.debugSelectNamed("r2.txt"); wc.debugRename() }
+                                            at(3.0) { pane0()?.debugSetEditingText("r1.txt"); wc.debugCommitEditing() }
+                                            at(4.0) { wc.debugReload() }
+                                            at(5.0) { NSLog("CASE leftoverMap rp=[%@] selected=%@ (r1.txt=옛 r2 기대)",
+                                                            Self.debugListing(root.appendingPathComponent("rp")), wc.debugSelectedName()) }
+                                        }
+                                    }
+                                } }
+                            }
+                        }
+                    }
+                }
+            }
+            // Foo/Foo 대치 → ⌘Z → 다른 행 클릭 확정: 엔진 비동기·undo 등록·편집 진입을 조건 폴링으로 기다린다(부하에서 고정 지연 오탐 실측)
+            at(19.4) {
+                pane0()?.debugPerformDrop([root.appendingPathComponent("Pkg/Pkg")], into: root, forceCopy: false)   // Foo/Foo 이동
+                poll({ wc.window?.attachedSheet != nil }) { at(0.6) {
+                    let shown = Self.debugCaptureSheet(of: wc.window, to: "/tmp/treefinder-case-foofoo.png")
+                    NSLog("CASE fooFoo sheet=%@ buttons=[%@]", shown == nil ? "none" : "attached", buttonTitles(shown?.contentView).joined(separator: " | "))
+                    Self.debugClickButton(in: shown?.contentView, titled: L("Replace"))
+                    poll({ exists("Pkg/p.txt") && !exists("Pkg/Pkg") }) { at(1.0) {   // undo 등록(메인)까지 여유
+                        NSLog("CASE fooFooAfterReplace pkg=[%@]", Self.debugListing(root.appendingPathComponent("Pkg")))
+                        wc.debugUndo()
+                        poll({ exists("Pkg/Pkg/p.txt") && exists("Pkg/other.txt") }) { at(0.4) {
+                            NSLog("CASE fooFooAfterUndo pkg=[%@]", Self.debugListing(root.appendingPathComponent("Pkg")))
+                            pane0()?.show(directory: same)
+                            at(0.8) {
+                                pane0()?.debugSelectNamed("a.txt"); wc.debugRename()
+                                poll({ wc.debugEditingState().contains("NSTextView") }) {
+                                    pane0()?.debugSetEditingText("a-renamed.txt"); pane0()?.debugSelectNamed("zz.txt"); wc.debugCommitEditing()
+                                    poll({ FileManager.default.fileExists(atPath: same.appendingPathComponent("a-renamed.txt").path) }) { at(0.6) {
+                                        NSLog("CASE clickCommit same=[%@] selected=%@", Self.debugListing(same), wc.debugSelectedName())
+                                        rest()
+                                    } }
+                                }
+                            }
+                        } }
+                    } }
+                } }
+            }
+        }
+        // TF_DEFER_ORDER=<루트> → (TF_START_DIR=<루트>) 충돌 시트 연속 응답 실측(2026-10-19). 기본 = [Q/Q, Y/Q, Q/sib.txt]를
+        // 루트로 이동하며 대치→병합. TF_DEFER_SOURCES(쉼표·루트 상대)·TF_DEFER_TARGET(루트 상대)·TF_DEFER_ANSWERS(Replace,Merge,…)로 바꾼다
+        if let rootPath = ProcessInfo.processInfo.environment["TF_DEFER_ORDER"] {
+            let root = URL(fileURLWithPath: rootPath)
+            let env = ProcessInfo.processInfo.environment
+            let sources = (env["TF_DEFER_SOURCES"] ?? "Q/Q,Y/Q,Q/sib.txt").split(separator: ",").map { root.appendingPathComponent(String($0)) }
+            let target = env["TF_DEFER_TARGET"].map { root.appendingPathComponent($0) } ?? root
+            let answers = (env["TF_DEFER_ANSWERS"] ?? "Replace,Merge").split(separator: ",").map { L(String($0)) }
+            let at: (Double, @escaping () -> Void) -> Void = { delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) }
+            func titles(_ view: NSView?) -> [String] {
+                guard let view else { return [] }
+                return ((view as? NSButton).map { [$0.title] } ?? []) + view.subviews.flatMap(titles)
+            }
+            at(1.2) { wc.debugPane(0)?.debugPerformDrop(sources, into: target, forceCopy: false) }
+            final class Box { var answered = 0; var seen: [ObjectIdentifier] = [] }   // 지역 상태(UserDefaults는 설치본과 공유 — 금지)
+            let box = Box()
+            for step in 0..<30 {   // 0.5초마다 시트 확인·응답(첫 시트 = 대치, 둘째 = 병합)
+                at(1.6 + Double(step) * 0.5) {
+                    guard let sheet = wc.window?.attachedSheet, !box.seen.contains(ObjectIdentifier(sheet)) else { return }
+                    box.seen.append(ObjectIdentifier(sheet))
+                    let t = titles(sheet.contentView)
+                    let answer = answers.indices.contains(box.answered) ? answers[box.answered] : L("Skip")
+                    NSLog("DEFER sheet#%d buttons=[%@] → %@", box.answered + 1, t.joined(separator: "|"), answer)
+                    box.answered += 1
+                    let index = box.answered
+                    at(1.2) {   // 등장 애니메이션 뒤 캡처 → 응답(0.6초는 빈 화면 실측)
+                        Self.debugCaptureSheet(of: wc.window, to: "/tmp/treefinder-defer-sheet\(index).png")
+                        Self.debugClickButton(in: sheet.contentView, titled: answer)
+                    }
+                }
+            }
+            at(17.0) {
+                NSLog("DEFER final root=[%@] sheet=%@", Self.debugListing(root), wc.window?.attachedSheet == nil ? "none" : "attached")
+            }
+        }
+        // TF_SKIP_NOTICE=1 → '대치 폴더와 겹쳐 건너뜀' 안내만 단독 렌더(연속 시트는 캡처가 비어서, 2026-10-19)
+        if ProcessInfo.processInfo.environment["TF_SKIP_NOTICE"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { wc.debugPane(0)?.debugShowSkipNotice("Q") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) {   // 창 서버 캡처는 화면 상태에 따라 백지 — 뷰 직접 렌더
+                guard let sheet = wc.window?.attachedSheet, let view = sheet.contentView,
+                      let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { NSLog("SKIP_NOTICE none"); return }
+                view.cacheDisplay(in: view.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "/tmp/treefinder-skip-notice.png"))
+                wc.window?.endSheet(sheet)
+            }
+        }
+        // TF_MD_RENAME=1 → (TF_START_DIR=note.md가 든 폴더) 미저장 편집 → 이름 변경 → 저장 시트 없음·저장 대상 = 새 이름 (2026-10-19)
+        if ProcessInfo.processInfo.environment["TF_MD_RENAME"] == "1" {
+            let at: (Double, @escaping () -> Void) -> Void = { delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) }
+            let preview = { wc.contentViewController?.children.compactMap { $0 as? NSSplitViewController }.first?
+                .splitViewItems.last?.viewController as? PreviewViewController }
+            at(1.0) { wc.debugPane(0)?.debugSelectNamed("note.md") }
+            at(3.5) { preview()?.debugMarkdownInject("# 미저장 편집\n\n이름 변경 후에도 남아야 함") }
+            at(4.5) { NSLog("MD_RENAME beforeRename %@", preview()?.debugMarkdownState() ?? "nil"); wc.debugRename() }
+            at(5.1) { wc.debugPane(0)?.debugSetEditingText("note2.md"); wc.debugCommitEditing() }
+            at(6.6) {
+                NSLog("MD_RENAME afterRename sheet=%@ %@ selected=%@", wc.window?.attachedSheet == nil ? "none" : "attached",
+                      preview()?.debugMarkdownState() ?? "nil", wc.debugSelectedName())
+                preview()?.debugSaveMarkdown()
+            }
+            at(7.6) {
+                let dir = startDirectory
+                NSLog("MD_RENAME afterSave files=[%@] note2=[%@]",
+                      ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).sorted().joined(separator: ", "),
+                      ((try? String(contentsOf: dir.appendingPathComponent("note2.md"), encoding: .utf8)) ?? "nil")
+                        .replacingOccurrences(of: "\n", with: "⏎").prefix(40) as CVarArg)
+            }
         }
         // TF_R1_TERMINAL=<픽스처 루트> → 터미널 포커스 메뉴 검증·세션 복원·스크롤백·⌘=·찾기 바·경로 ⌘클릭·cd 따라가기·명령 뒤 트리 갱신
         if let rootPath = ProcessInfo.processInfo.environment["TF_R1_TERMINAL"] {

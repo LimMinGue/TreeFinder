@@ -652,6 +652,10 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
             self.activate(pane: list)
         }
         list.onAddFavorite = { [weak self] url in self?.treeController?.addFavorite(url: url) }
+        list.onRename = { [weak self, weak list] old, new in   // 미리보기는 활성 페인 것 — 비활성 페인 표기 교정이 대상을 옮기지 않게
+            guard let self, let list, list === self.listController else { return }
+            self.previewController?.itemRenamed(from: old, to: new)
+        }
         list.onPastePathsToTerminal = { [weak self] urls in
             self?.splitController?.splitViewItems.last?.isCollapsed = false
             self?.previewController?.pastePathsIntoTerminal(urls)

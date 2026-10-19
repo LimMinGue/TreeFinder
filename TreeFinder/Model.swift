@@ -231,6 +231,20 @@ enum DirectoryLister {
         return cased.path == url.path ? url : URL(fileURLWithPath: cased.path, isDirectory: url.hasDirectoryPath)
     }
 
+    /// 커널이 아는 실제 경로(F_GETPATH) — 링크·/private·대소문자·펌링크(/System/Volumes/Data·/Volumes/Macintosh HD)를 전부
+    /// 정규화하고 **FSEvents가 보고하는 표기와 일치**한다(5종 실측 2026-10-19 — realpath는 펌링크를 못 푼다). 비교 키 전용.
+    /// 대상을 여므로 비로컬 금지(§3) — 호출자가 가드. O_NONBLOCK = 이름 있는 파이프에서 막히지 않게. 실패(없음·권한)면 nil.
+    nonisolated static func kernelPath(_ path: String) -> String? {
+        // 폴더·일반 파일만 연다 — 이름 있는 파이프를 읽는 쪽으로 열면 대기 중인 쓰기 프로세스가 SIGPIPE로 죽는다(출하 전 검증)
+        var info = stat()
+        guard stat(path, &info) == 0, [S_IFDIR, S_IFREG].contains(info.st_mode & S_IFMT) else { return nil }
+        let fd = open(path, O_EVTONLY | O_NONBLOCK)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        return fcntl(fd, F_GETPATH, &buffer) == 0 ? String(cString: buffer) : nil
+    }
+
     /// 심링크가 가리키는 **후보** 경로 — readlink 체인만 돌고 대상은 **건드리지 않는다**(stat 0).
     /// 링크가 아니거나 자기 자신으로 돌아오면 nil.
     /// 죽은 네트워크 마운트를 가리킬 수 있는 자리(동기·메인 스레드 열거)에서는 **이걸로 먼저 판정**하고,

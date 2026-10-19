@@ -746,6 +746,19 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         }
     }
 
+    /// 목록에서 이름이 바뀜 — 편집 중인 마크다운의 저장 대상을 새 경로로 옮긴다(파일 자신 또는 그 상위 폴더 이름 변경).
+    /// 안 하면 저장이 옛 경로에 새 파일을 만들어 내용이 두 파일로 갈라지고, 새 이름 선택이 '다른 파일'로 보여
+    /// 저장 시트가 겹쳐 떴다(2026-10-14 출하 전 검증).
+    func itemRenamed(from old: URL, to new: URL) {
+        guard let current = mdCurrentURL else { return }
+        let oldPath = old.standardizedFileURL.path, path = current.standardizedFileURL.path
+        if path == oldPath {
+            mdCurrentURL = new
+        } else if path.hasPrefix(oldPath + "/") {
+            mdCurrentURL = URL(fileURLWithPath: new.path + path.dropFirst(oldPath.count))   // 넘어온 표기 그대로(/private 유지 — 목록 URL과 같게)
+        }
+    }
+
     /// 버리기 = 에디터 잔존 상태 무효화 — 같은 파일 재선택 시 loadMarkdown의 "같은 파일" 가드가 디스크 대신
     /// 버린 편집 내용을 다시 보여주던 문제(2026-09-05 A2). 알림 시트의 버리기 분기와 검증 훅이 공용.
     private func discardMarkdownEdits() {
@@ -1543,6 +1556,13 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
             self?.saveMarkdown()
         }
     }
+
+    /// TF_MD_RENAME — 미저장 편집 주입 · 상태 조회 · 저장 (이름 변경 후 저장 대상 실측, 2026-10-19)
+    func debugMarkdownInject(_ markdown: String) {
+        mdWebView?.evaluateJavaScript("editor.setMarkdown(\(String(reflecting: markdown)))") { _, _ in }
+    }
+    func debugMarkdownState() -> String { "url=\(mdCurrentURL?.lastPathComponent ?? "nil") dirty=\(mdDirty)" }
+    func debugSaveMarkdown() { saveMarkdown() }
 
     /// TF_MD_DISCARD=<다른 파일 경로> — (TF_PREVIEW_FILE=A.md 병용) A 편집 주입 → 버리기 → 다른 파일 → A 재선택 후
     /// 에디터 내용이 디스크 원문과 같은지 실측(수정 전엔 버린 편집이 그대로 보였다, A2)

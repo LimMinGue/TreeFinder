@@ -2401,16 +2401,6 @@
         }
       }
     },
-    "The item you’re moving is the existing item or is inside it, so it can’t be replaced.": {
-      "localizations": {
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "옮기려는 항목이 기존 항목 자체이거나 그 안에 있어 대치할 수 없습니다."
-          }
-        }
-      }
-    },
     "Do you want to merge the folders, keep both, or replace the existing folder?": {
       "localizations": {
         "ko": {
@@ -2517,6 +2507,56 @@
           "stringUnit": {
             "state": "translated",
             "value": "문서의 본문을 읽을 수 없습니다."
+          }
+        }
+      }
+    },
+    "%@ copy": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@-복사본"
+          }
+        }
+      }
+    },
+    "“%@” can’t be replaced.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“%@” 항목을 대치할 수 없습니다."
+          }
+        }
+      }
+    },
+    "The item you’re moving is an alias of this item or of something inside it. Replacing it would move the original to the Trash and leave an alias with nothing to point to. This item will be skipped.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "옮기려는 항목이 이 항목(또는 그 안의 항목)을 가리키는 가상본입니다. 대치하면 원본이 휴지통으로 가고 가리킬 곳이 없는 가상본만 남으므로 이 항목은 건너뜁니다."
+          }
+        }
+      }
+    },
+    "“%@” will be skipped.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“%@” 항목을 건너뜁니다."
+          }
+        }
+      }
+    },
+    "It overlaps a folder you chose to replace in this operation. That folder will be replaced, and this item won’t be moved.": {
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 작업에서 대치하기로 한 폴더와 겹칩니다. 그 폴더는 대치되고, 이 항목은 옮기지 않습니다."
           }
         }
       }
