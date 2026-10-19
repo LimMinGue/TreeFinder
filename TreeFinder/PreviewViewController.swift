@@ -1557,6 +1557,7 @@ final class PreviewViewController: NSViewController, WKScriptMessageHandler, WKN
         }
     }
 
+    func debugSegment() -> Int { tabs.selectedSegment }   // TF_RESIDUAL
     /// TF_MD_RENAME — 미저장 편집 주입 · 상태 조회 · 저장 (이름 변경 후 저장 대상 실측, 2026-10-19)
     func debugMarkdownInject(_ markdown: String) {
         mdWebView?.evaluateJavaScript("editor.setMarkdown(\(String(reflecting: markdown)))") { _, _ in }

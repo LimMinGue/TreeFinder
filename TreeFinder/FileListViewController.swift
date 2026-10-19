@@ -291,9 +291,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         iconItem?.endEditing()
         let hadPendingRefresh = pendingRefresh   // EditGuard 보류분 — 어느 경로로 끝나도 흡수
         pendingRefresh = false
-        let resumeSizeRebuild = sizeRebuildAfterEdit   // 편집 중 미룬 크기 정렬 — 끝나면 다시 예약
-        sizeRebuildAfterEdit = false
-        defer { if resumeSizeRebuild { scheduleSizeRebuild() } }
+        let deferredWork = afterEditWork   // 편집 중 미룬 재구성(설정·정렬·검색 결과·크기 정렬) — 끝나면 실행
+        afterEditWork = []
+        defer { deferredWork.forEach { $0() } }
         // 아이콘 경로는 no-op/오류에도 항상 리로드 — 재구성이 라벨을 올바로 되돌린다(list는 flicker 회피로 리로드 생략)
         // 대상은 편집 시작 때 고정한 URL — 행 번호로 찾으면 편집 중 목록 재구성(크기 정렬·설정 변경·표기 교정)으로
         // 행이 밀렸을 때 입력 중 이름이 **다른 파일**에 붙는다(2026-10-14 출하 전 검증 실측). 사라졌으면 아무것도 안 함.
@@ -309,7 +309,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         // 표시명('/')을 디스크명(':')으로 변환해 비교 — 안 그러면 '개인/가족' 표시 == '개인:가족' 디스크가
         // 서로 다르다고 오판돼, 변경 없는 편집도 '이미 존재' 오류를 낸다 (제작자 지시 2026-07-23)
         guard !newName.isEmpty, Self.diskName(fromDisplay: newName) != item.name else {
-            if iconItem == nil { field.stringValue = Self.displayName(fromDisk: item.name) }
+            field.stringValue = Self.displayName(fromDisk: item.name)   // 아이콘 라벨도 원래 이름으로(입력값이 남던 것 — §40 잔여)
             if hadPendingRefresh || iconItem != nil { reloadCurrentDirectory() }
             return
         }
@@ -321,7 +321,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             let parent = item.url.deletingLastPathComponent()
             if parent.standardizedFileURL.path != directory?.standardizedFileURL.path { onContentsChanged?(parent) }
         } catch {
-            if iconItem == nil { field.stringValue = Self.displayName(fromDisk: item.name) }
+            field.stringValue = Self.displayName(fromDisk: item.name)
             reportError(error)
         }
         reloadCurrentDirectory()
@@ -340,6 +340,15 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 // 다시 적용했다(출하 전 검증 실측). 한계: 재등록은 새 undo 그룹이라 redo 스택이 비워진다.
                 if target.fileUndoManager.isUndoing {
                     DispatchQueue.main.async { target.registerRenameUndo(current: current, originalName: originalName) }
+                } else if target.fileUndoManager.isRedoing {
+                    // redo 실패는 빈 'Rename' 그룹을 undo 스택에 남겨 다음 ⌘Z가 헛돈다 — 다음 틱에 그 빈 그룹만 소비
+                    // (NSUndoManager 실측: 빈 그룹 undo = 아무 동작 없이 사라지고 redo 스택에도 안 쌓임). 그 사이 다른 작업
+                    // (엔진 완료의 undo 등록 등)이 먼저 올라오면 그걸 되돌리게 되므로(출하 전 검증 실측) 표식 이름이 맨 위일 때만.
+                    let marker = L("Rename") + "\u{200B}"
+                    target.fileUndoManager.setActionName(marker)
+                    DispatchQueue.main.async {
+                        if target.fileUndoManager.canUndo, target.fileUndoManager.undoActionName == marker { target.fileUndoManager.undo() }
+                    }
                 }
             }
             target.reloadCurrentDirectory()
@@ -358,6 +367,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         if isDirectory { NotificationCenter.default.post(name: .directoryRenamed, object: nil) }
     }
     private var renamedPaths: [String: String] = [:]   // 옛 경로 → 새 경로(다음 rebuildItems 1회)
+    /// 이름 변경으로 이어 붙인 선택을 재발행하는 중 — onSelect 수신측이 미리보기 탭 전환을 생략하는 신호
+    private(set) var isRepublishingAfterRename = false
 
     /// 보고 있는 폴더의 표기가 디스크와 대소문자만 달라졌으면 디스크 표기로 다시 연다(FSEvents 감시 경로 교정).
     /// 인라인 이름 변경 중이면 건너뜀 — 재적재가 편집을 확정한다(출하 전 검증 실측). 다음 폴더 이동 때 show가 교정.
@@ -537,7 +548,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
         // 옵저버 토큰은 보관 후 deinit에서 해제 — 페인(듀얼 페인 토글·창 닫기)마다 누적되던 누수 차단(2026-09-05 A12)
         observers.append(NotificationCenter.default.addObserver(forName: .settingsChanged, object: nil, queue: .main) {
-            [weak self] _ in self?.reloadActiveView()   // 날짜 포맷·확장자 표시 등 즉시 반영
+            [weak self] _ in   // 날짜 포맷·확장자 표시 등 즉시 반영(편집 중이면 끝난 뒤)
+            guard let self, !self.deferWhileEditing({ [weak self] in self?.reloadActiveView() }) else { return }
+            self.reloadActiveView()
         })
         // 다른 페인에서 폴더 이름 변경 → 이 페인의 경로 표기가 디스크와 대소문자만 달라졌으면 다시 연다(didRename)
         observers.append(NotificationCenter.default.addObserver(forName: .directoryRenamed, object: nil, queue: .main) {
@@ -778,9 +791,16 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     // MARK: 컬럼 뷰 (NSBrowser — Finder Miller 컬럼, 제작자 지시 2026-07-25)
 
     /// 루트 = 현재 폴더로 브라우저 재적재. 캐시 비움 후 컬럼 0부터 다시 그림.
-    private func reloadBrowser() {
+    /// seed: 방금 비동기로 받은 현재 폴더 목록 — 열 0을 이걸로 채워 같은 폴더를 메인 스레드에서 다시 동기로 읽지 않는다
+    /// (비로컬이면 그 동기 리스팅이 죽은 마운트에서 멈출 수 있었다 — §40 잔여). 정렬은 browserChildURLs와 같은 함수.
+    private func reloadBrowser(seed: [FileItem]? = nil) {
         browserChildrenCache.removeAll()
         browserItemByURL.removeAll()
+        if let seed, let directory {
+            let sorted = DirectoryLister.sorted(seed)
+            for item in sorted { browserItemByURL[item.url] = item }
+            browserChildrenCache[directory] = sorted.map(\.url)
+        }
         browser.loadColumnZero()
     }
 
@@ -1455,6 +1475,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         }
         navigatingViaHistory = false
         renamedPaths.removeAll()   // 다른 폴더 — 남은 선택 잇기는 무의미
+        isRepublishingAfterRename = false
         self.directory = directory
         filterText = ""   // 폴더 이동 시 검색 필터 초기화 (Finder 규약)
         tableView.typeSelect.reset(); collectionView.typeSelect.reset()   // type-select 버퍼 리셋 (조사 §함정6)
@@ -1496,7 +1517,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 self.selectionDidSync()   // onSelect(nil) + 갤러리 미리보기 초기화
             }
             self.requestFolderSizes()
-            if self.viewStyle == .columns { self.reloadBrowser() }   // 컬럼 뷰 루트 = 새 폴더(종전엔 옛 폴더 컬럼이 남았다)
+            if self.viewStyle == .columns { self.reloadBrowser(seed: listed) }   // 컬럼 뷰 루트 = 새 폴더(종전엔 옛 폴더 컬럼이 남았다)
         }
     }
 
@@ -1621,7 +1642,15 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     /// 크기순 정렬 중 폴더 크기 도착마다 전체 재정렬하면 대량 폴더에서 프리즈 — 0.3초 묶음 (QC 위원)
-    private var sizeRebuildAfterEdit = false
+    /// 인라인 이름 편집 중이면 재구성을 편집 종료 뒤로 미룬다 — 편집 중 reloadData가 입력 중 이름을 조기 확정했다(§40 잔여).
+    /// 미뤘으면 true. (폴더 이동 등 사용자의 다른 조작은 Finder처럼 그 자리에서 확정)
+    private var afterEditWork: [() -> Void] = []
+    @discardableResult
+    private func deferWhileEditing(_ work: @escaping () -> Void) -> Bool {
+        guard editingRow != nil else { return false }
+        afterEditWork.append(work)
+        return true
+    }
 
     private func scheduleSizeRebuild() {
         guard !sizeRebuildScheduled else { return }
@@ -1631,7 +1660,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             self.sizeRebuildScheduled = false
             guard self.sortKey == .size else { return }
             // 편집 중 재정렬 금지 — 편집 종료 때 다시 예약(종전 0.3초 폴링은 창이 닫혀도 돌았다 — 출하 전 검증)
-            if self.editingRow != nil { self.sizeRebuildAfterEdit = true; return }
+            if self.deferWhileEditing({ [weak self] in self?.scheduleSizeRebuild() }) { return }
             self.rebuildItems(preserveSelection: true)
         }
     }
@@ -1686,6 +1715,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         if preserveSelection {
             // 백그라운드 리빌드(FSEvents·폴더 크기)가 뷰포트를 점프시키지 않도록 스크롤은 정렬 변경만 (검증 minor)
             let tableBefore = viewStyle == .list ? tableView.selectedRowIndexes : nil
+            // 이름 변경으로 이어 붙인 선택의 재발행은 '같은 항목 갱신' — 오른쪽 터미널 탭을 미리보기로 돌리지 않게 표시(§40 잔여)
+            isRepublishingAfterRename = selected != original
+            defer { isRepublishingAfterRename = false }
             restoreSelection(urls: selected, scrollToFirst: scrollToSelection)
             // 리스트는 선택 인덱스가 바뀌면 델리게이트가 이미 발행했다 — 같은 URL 이중 발행 생략(출하 전 검증)
             let delegatePublished = viewStyle == .list && tableView.selectedRowIndexes != tableBefore
@@ -1773,11 +1805,15 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             let base = directory.resolvingSymlinksInPath().standardizedFileURL.path   // 여기서 1회(오프메인)
             if Task.isCancelled { return }
             await MainActor.run { [weak self] in
-                guard let self, self.filterText == text, self.directory == directory else { return }   // stale 결과 폐기
-                self.searchBase = base
-                self.searchResults = matches
-                self.rebuildItems(scrollToTop: true)
-            self.beginPendingSelect()   // 폴더 이동 후 예약 선택(경로 ⌘클릭·들어있는 폴더 열기) — 새로 고침 완료부와 별개
+                guard let self else { return }
+                let apply = { [weak self] in
+                    guard let self, self.filterText == text, self.directory == directory else { return }   // stale 결과 폐기
+                    self.searchBase = base
+                    self.searchResults = matches
+                    self.rebuildItems(scrollToTop: true)
+                    self.beginPendingSelect()   // 폴더 이동 후 예약 선택(경로 ⌘클릭·들어있는 폴더 열기) — 새로 고침 완료부와 별개
+                }
+                if !self.deferWhileEditing(apply) { apply() }   // 편집 중 도착한 검색 결과는 편집이 끝난 뒤 반영
             }
         }
     }
@@ -2086,6 +2122,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
             // 꼬리 배치·정리 맨 끝·먼저 실행·형제 당기기)는 출하 전 검증마다 새 결함(영구 삭제·무한 루프)을 낳아 폐기(decisions §40).
             var deferred: [FileOperationEngine.Item] = []
             var deferredKeys: [String] = []
+            // 이 작업이 대치로 채우기로 한 자리 — 같은 이름 원본이 또 오면 묻지 않고 '둘 다 유지'(이름 2). '모두 대치'면 두 번째가
+            // 첫 번째 결과를 휴지통으로 보냈다(§40 잔여).
+            var replacedKeys: Set<String> = []
             var queue: [TransferStep] = transfers.map { .transfer($0) }
             while !queue.isEmpty {
                 let step = queue.removeFirst()
@@ -2121,6 +2160,13 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 // 이미 대치하기로 한 폴더(보류)와 같은 자리·그 안·그 바깥(조상)으로 가는 충돌 — 한 작업에서 '그 폴더를 대치'와
                 // '그 안으로 병합·유지·대치'(또는 그 조상을 대치)는 의도가 맞설 수 없다. 순서를 바꿔 맞추던 시도(먼저 실행·형제 당기기)는 조용한 휴지통행·
                 // 무한 루프를 낳아(출하 전 검증 2026-10-19) 폐기 — 안내 후 이 항목만 건너뛴다.
+                // 자리 키 = 부모의 커널 경로 + 디스크에 저장된 이름(.nameKey — 링크 미추종, 대소문자 무시 볼륨에선 표기 통일)
+                let slotKey = Self.dropKey(t.target) + "/"
+                    + PathPasteboard.normalized((try? dest.resourceValues(forKeys: [.nameKey]))?.name ?? dest.lastPathComponent)
+                if replacedKeys.contains(slotKey) {
+                    items.append(transferItem(source: t.source, into: t.target, isMove: t.isMove))
+                    continue
+                }
                 if deferredKeys.contains(where: { destKey == $0 || destKey.hasPrefix($0 + "/") || $0.hasPrefix(destKey + "/") }) {
                     await informSkippedForReplace(name: t.source.lastPathComponent)
                     continue
@@ -2142,6 +2188,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                     // 가상본만 남는다(안쪽 경우는 2차 검증 실측). 안내 후 이 항목만 건너뜀
                     if sourceIsLink && (sameItem || sourceKey.hasPrefix(destKey + "/")) { await informCannotReplace(dest: dest); continue }
                     let item = replaceItem(source: t.source, dest: dest, isMove: t.isMove, containsSource: containsSource)
+                    replacedKeys.insert(slotKey)
                     // Foo/Foo 대치는 맨 뒤로 — 같은 작업의 형제 항목(바깥 폴더 안)이 먼저 빠져나간 뒤 바깥을 휴지통으로
                     // (앞서 실행하면 형제 이동이 '없음'으로 중단됐다 — 출하 전 검증 2026-10-19)
                     if containsSource { deferred.append(item); deferredKeys.append(destKey) } else { items.append(item) }
@@ -2268,6 +2315,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     /// 사용자 잠금(uchg) 설정 — 바꿨으면 true(원래 잠겨 있었다는 뜻: 해제 후 다시 걸 때 사용)
     nonisolated private static func setUserImmutable(_ locked: Bool, _ url: URL) -> Bool {
         var target = url
+        target.removeAllCachedResourceValues()   // URL이 잠금 여부를 캐시한다 — 대치 때 읽은 '안 잠김'이 남아 ⌘Z가 잠금을 못 풀었다(실측)
         guard (try? target.resourceValues(forKeys: [.isUserImmutableKey]))?.isUserImmutable == !locked else { return false }
         var values = URLResourceValues()
         values.isUserImmutable = locked
@@ -2281,9 +2329,11 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     /// 실패로 임시 자리에 남은 항목은 보이는 이름으로 꺼낸다 — 숨김 이름에 데이터가 숨는 일 금지.
     /// 확장자 분리는 원래 항목 기준(임시 이름엔 확장자가 없어 .app이 'Foo.app 2'가 됐다 — 출하 전 검증)
-    nonisolated private static func surfaceStaged(_ stage: URL, as dest: URL, splitExtension: Bool) {
-        guard nameIsTaken(atPath: stage.path) else { return }
-        try? FileManager.default.moveItem(at: stage, to: availableURL(for: dest, splitExtension: splitExtension))
+    @discardableResult
+    nonisolated private static func surfaceStaged(_ stage: URL, as dest: URL, splitExtension: Bool) -> URL? {
+        guard nameIsTaken(atPath: stage.path) else { return nil }
+        let visible = availableURL(for: dest, splitExtension: splitExtension)
+        return (try? FileManager.default.moveItem(at: stage, to: visible)) != nil ? visible : stage
     }
 
     /// 건너뜀 안내 — 이 작업에서 대치하기로 한 폴더와 겹치는 충돌. 이 항목만 건너뛰고 나머지는 계속
@@ -2315,9 +2365,16 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         fileUndoManager.registerUndo(withTarget: self) { target in
             let item = FileOperationEngine.Item(name: dest.lastPathComponent) {
                 let fm = FileManager.default
+                // 결과물이 잠겨 있으면(잠긴 원본을 대치) 잠시 풀어야 휴지통·이동이 된다 — 종전엔 ⌘Z가 실패만 했다(§40 잔여)
+                // 휴지통의 옛 항목이 사라졌으면(휴지통 비움) 아무것도 옮기지 않는다 — 중간에 실패해 잠금만 풀린 채 남지 않게
+                if let replaced, !Self.nameIsTaken(atPath: replaced.path) {
+                    throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError, userInfo: [NSFilePathErrorKey: replaced.path])
+                }
+                let wasLocked = Self.setUserImmutable(false, dest)
                 guard let source else {   // 복사였으면 새 항목은 휴지통, 옛 항목은 제자리로
                     var gone: NSURL?
-                    try fm.trashItem(at: dest, resultingItemURL: &gone)
+                    do { try fm.trashItem(at: dest, resultingItemURL: &gone) }
+                    catch { if wasLocked { _ = Self.setUserImmutable(true, dest) }; throw error }
                     if let replaced { try fm.moveItem(at: replaced, to: dest) }
                     return nil
                 }
@@ -2325,12 +2382,16 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
                 // 원래 자리가 옛 항목 안(Foo/Foo)이라 이 순서여야 한다
                 let split = Self.splitsExtension(dest)
                 let stage = Self.stagingURL(for: dest)
-                try fm.moveItem(at: dest, to: stage)
+                do { try fm.moveItem(at: dest, to: stage) }
+                catch { if wasLocked { _ = Self.setUserImmutable(true, dest) }; throw error }
                 do {
                     if let replaced { try fm.moveItem(at: replaced, to: dest) }
                     try fm.moveItem(at: stage, to: source)
+                    if wasLocked { _ = Self.setUserImmutable(true, source) }
                 } catch {
-                    Self.surfaceStaged(stage, as: dest, splitExtension: split)
+                    let surfaced = Self.surfaceStaged(stage, as: dest, splitExtension: split)
+                    if wasLocked { for url in [surfaced, source].compactMap({ $0 }) where Self.nameIsTaken(atPath: url.path) {
+                        _ = Self.setUserImmutable(true, url) } }   // 실패로 남은 결과물도 잠금 유지
                     throw error
                 }
                 return nil
@@ -2376,7 +2437,9 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 
     /// 확장자를 떼고 그 앞에 접미사·번호를 붙일 항목인가 — 파일·패키지(.app)는 예, 일반 폴더는 아니오(Finder 규약)
     nonisolated static func splitsExtension(_ url: URL) -> Bool {
-        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+        // 심링크는 대상 기준 — 점 있는 폴더를 가리키는 링크의 사본이 'link.v1-복사본.2'로 쪼개졌다(§40 잔여)
+        let target = isSymlink(url.path) ? url.resolvingSymlinksInPath() : url
+        let values = try? target.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
         return values?.isDirectory != true || values?.isPackage == true
     }
 
@@ -3528,6 +3591,12 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
     func debugCopyPaste() { copy(nil); paste(nil) }
     func debugCopy() { copy(nil) }
+    func debugBrowserColumn0() -> String {   // TF_RESIDUAL — 컬럼 0(현재 폴더) 캐시·화면 행 수
+        let cached = directory.flatMap { browserChildrenCache[$0] }?.map(\.lastPathComponent).joined(separator: ",") ?? "없음"
+        return "cache=[\(cached)]"
+    }
+    func debugCanUndo() -> String { "\(fileUndoManager.canUndo)(\(fileUndoManager.undoActionName))" }   // TF_RESIDUAL
+    func debugRedo() { fileUndoManager.redo() }
     func debugShowSkipNotice(_ name: String) { Task { await informSkippedForReplace(name: name) } }   // TF_SKIP_NOTICE 렌더
     func debugPaste() { paste(nil) }
     func debugSetEditingText(_ text: String) { (view.window?.firstResponder as? NSTextView)?.string = text }
@@ -3603,7 +3672,8 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
               let key = descriptor.key.flatMap(SortKey.init(rawValue:)) else { return }
         sortKey = key
         sortAscending = descriptor.ascending
-        rebuildItems(preserveSelection: true, scrollToSelection: true)   // 재정렬 후 선택 가시화 (Finder 규약)
+        let resort: () -> Void = { [weak self] in self?.rebuildItems(preserveSelection: true, scrollToSelection: true) }   // 재정렬 후 선택 가시화 (Finder 규약)
+        if !deferWhileEditing(resort) { resort() }
     }
 
     /// 컬럼 텍스트 단일 소스 — 셀 렌더와 적정 폭 계산(구분선 더블클릭)이 같은 경로 (규칙 4)

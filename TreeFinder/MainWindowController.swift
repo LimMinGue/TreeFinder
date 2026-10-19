@@ -624,6 +624,7 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
         searchScopeChanged(item)
     }
     func debugShowTerminal() { previewController?.debugShowTerminal() }
+    func debugPreviewSegment() -> Int { previewController?.debugSegment() ?? -1 }   // TF_RESIDUAL — 0 미리보기 / 1 터미널
     func debugTerminalInfo() -> String { previewController?.debugTerminalInfo() ?? "nil" }
     func debugTerminalOpenLink(_ link: String) { previewController?.debugTerminalOpenLink(link) }
     func debugTerminalType(_ text: String) { previewController?.debugTerminalKeySim(text) }
@@ -669,7 +670,9 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
             guard let self, let list, list === self.listController else { return }
             // 네트워크 컴퓨터 등 비파일 URL은 미리보기·경로 바 대상 아님 (워게임 network_browse)
             let fileURL = (item?.url.isFileURL == true) ? item?.url : nil
-            self.previewController?.showFromSelection(fileURL)   // 터미널 탭이어도 미리보기로 전환 (§파일 목록)
+            // 터미널 탭이어도 미리보기로 전환 (§파일 목록) — 단 이름 변경으로 이어 붙인 같은 항목의 재발행은 탭을 그대로(§40 잔여)
+            if list.isRepublishingAfterRename { self.previewController?.show(fileURL) }
+            else { self.previewController?.showFromSelection(fileURL) }
             let directoryURL = (list.directory?.isFileURL == true) ? list.directory : nil
             self.contentController?.pathBar.show(fileURL ?? directoryURL)   // 선택 없으면 현재 폴더 (§9)
             // 파일 선택 시에도 트리를 현재 폴더로 복귀 — 네트워크 호스트 클릭(연결 실패 등)으로

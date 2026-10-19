@@ -1093,7 +1093,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let env = ProcessInfo.processInfo.environment
             let sources = (env["TF_DEFER_SOURCES"] ?? "Q/Q,Y/Q,Q/sib.txt").split(separator: ",").map { root.appendingPathComponent(String($0)) }
             let target = env["TF_DEFER_TARGET"].map { root.appendingPathComponent($0) } ?? root
-            let answers = (env["TF_DEFER_ANSWERS"] ?? "Replace,Merge").split(separator: ",").map { L(String($0)) }
+            let answers = (env["TF_DEFER_ANSWERS"] ?? "Replace,Merge").split(separator: ",").map(String.init)   // 'Apply to All+Replace' = 순서대로 클릭
             let at: (Double, @escaping () -> Void) -> Void = { delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) }
             func titles(_ view: NSView?) -> [String] {
                 guard let view else { return [] }
@@ -1113,12 +1113,106 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let index = box.answered
                     at(1.2) {   // 등장 애니메이션 뒤 캡처 → 응답(0.6초는 빈 화면 실측)
                         Self.debugCaptureSheet(of: wc.window, to: "/tmp/treefinder-defer-sheet\(index).png")
-                        Self.debugClickButton(in: sheet.contentView, titled: answer)
+                        for part in answer.components(separatedBy: "+") { Self.debugClickButton(in: sheet.contentView, titled: L(part)) }
                     }
                 }
             }
             at(17.0) {
                 NSLog("DEFER final root=[%@] sheet=%@", Self.debugListing(root), wc.window?.attachedSheet == nil ? "none" : "attached")
+            }
+        }
+        // TF_RESIDUAL=<루트> → (TF_START_DIR=<루트>) §40 잔여 수정 실측(2026-10-19): 잠긴 결과물 대치 ⌘Z · redo 실패 뒤 빈 그룹 ·
+        // 폴더 링크 사본 이름 · 편집 중 설정 변경 시 입력 보존 · 이름 변경 후 터미널 탭 유지
+        if let rootPath = ProcessInfo.processInfo.environment["TF_RESIDUAL"] {
+            let root = URL(fileURLWithPath: rootPath)
+            let at: (Double, @escaping () -> Void) -> Void = { delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) }
+            func poll(_ cond: @escaping () -> Bool, _ then: @escaping () -> Void, tries: Int = 50) {
+                if cond() || tries == 0 { then(); return }
+                at(0.2) { poll(cond, then, tries: tries - 1) }
+            }
+            let pane = { wc.debugPane(0) }
+            func text(_ rel: String) -> String { (try? String(contentsOf: root.appendingPathComponent(rel), encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? "없음" }
+            func locked(_ rel: String) -> Int { ((try? root.appendingPathComponent(rel).resourceValues(forKeys: [.isUserImmutableKey]))?.isUserImmutable ?? false) ? 1 : 0 }
+            // ① 잠긴 결과물 대치 → ⌘Z
+            at(1.2) {
+                pane()?.show(directory: root.appendingPathComponent("dstL"))
+                pane()?.debugPerformDrop([root.appendingPathComponent("srcL/lk.txt")], into: root.appendingPathComponent("dstL"), forceCopy: true)
+                poll({ wc.window?.attachedSheet != nil }) { at(0.6) {
+                    Self.debugClickButton(in: wc.window?.attachedSheet?.contentView, titled: L("Replace"))
+                    poll({ text("dstL/lk.txt") == "NEW" }) { at(1.0) {
+                        NSLog("RESIDUAL lockedReplace lk=%@ locked=%d", text("dstL/lk.txt"), locked("dstL/lk.txt"))
+                        wc.debugUndo()
+                        poll({ text("dstL/lk.txt") == "OLD" }) { at(0.4) {
+                            func texts(_ v: NSView?) -> [String] { guard let v else { return [] }
+                                return ((v as? NSTextField).map { [$0.stringValue] } ?? []) + v.subviews.flatMap(texts) }
+                            NSLog("RESIDUAL lockedUndo lk=%@ sheet=%@ [%@]", text("dstL/lk.txt"), wc.window?.attachedSheet == nil ? "none" : "attached",
+                                  texts(wc.window?.attachedSheet?.contentView).filter { !$0.isEmpty }.joined(separator: " / "))
+                            if let s = wc.window?.attachedSheet { wc.window?.endSheet(s) }
+                            step2()
+                        } }
+                    } }
+                } }
+            }
+            // ② redo 실패 뒤 빈 그룹: r/a.txt → b.txt, ⌘Z, b.txt를 밖에서 생성, redo(실패) → 잠시 뒤 canUndo=false여야
+            func step2() {
+                pane()?.show(directory: root.appendingPathComponent("r"))
+                at(0.8) { pane()?.debugSelectNamed("a.txt"); wc.debugRename() }
+                at(1.4) { pane()?.debugSetEditingText("b.txt"); wc.debugCommitEditing() }
+                at(2.4) { wc.debugUndo() }
+                at(3.2) {
+                    FileManager.default.createFile(atPath: root.appendingPathComponent("r/b.txt").path, contents: Data("other".utf8))
+                    pane()?.debugRedo()
+                }
+                at(4.4) {
+                    NSLog("RESIDUAL redoFail canUndo=%@ r=[%@] sheet=%@", pane()?.debugCanUndo() ?? "nil",
+                          ((try? FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("r").path)) ?? []).sorted().joined(separator: ","),
+                          wc.window?.attachedSheet == nil ? "none" : "attached")
+                    if let s = wc.window?.attachedSheet { wc.window?.endSheet(s) }
+                    step3()
+                }
+            }
+            // ③ 폴더 링크 사본 이름(점 있는 폴더를 가리키는 링크)
+            func step3() {
+                pane()?.show(directory: root.appendingPathComponent("lnk"))
+                at(0.8) { pane()?.debugSelectNamed("v1.2-link"); pane()?.debugCopyPaste() }
+                at(2.0) {
+                    NSLog("RESIDUAL linkCopy lnk=[%@]", ((try? FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("lnk").path)) ?? []).sorted().joined(separator: ","))
+                    step4()
+                }
+            }
+            // ④ 편집 중 설정 변경 → 편집 유지(조기 확정 없음) → 확정은 사용자 입력대로
+            func step4() {
+                pane()?.show(directory: root.appendingPathComponent("e"))
+                at(0.8) { pane()?.debugSelectNamed("a.txt"); wc.debugRename() }
+                at(1.4) {
+                    pane()?.debugSetEditingText("a-typed")
+                    NotificationCenter.default.post(name: .settingsChanged, object: nil)
+                }
+                at(2.0) {
+                    NSLog("RESIDUAL editDuringSettings %@ e=[%@]", wc.debugEditingState(),
+                          ((try? FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("e").path)) ?? []).sorted().joined(separator: ","))
+                    pane()?.debugSetEditingText("a-final.txt"); wc.debugCommitEditing()
+                }
+                at(3.0) {
+                    NSLog("RESIDUAL editCommitted e=[%@]", ((try? FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("e").path)) ?? []).sorted().joined(separator: ","))
+                    step5()
+                }
+            }
+            // ⑤ 오른쪽 터미널 탭에서 이름 변경 → 탭 유지
+            func step5() {
+                wc.debugShowTerminal()
+                at(1.0) { pane()?.debugSelectNamed("a-final.txt"); wc.debugRename() }
+                at(1.6) { pane()?.debugSetEditingText("a-renamed.txt"); wc.debugCommitEditing() }
+                at(2.8) { NSLog("RESIDUAL terminalTab segment=%d (1=터미널 유지) selected=%@", wc.debugPreviewSegment(), wc.debugSelectedName())
+                          step6() }
+            }
+            // ⑥ 컬럼 보기에서 다른 폴더로 이동 → 컬럼 0 = 새 폴더(방금 받은 목록으로 채움)
+            func step6() {
+                wc.debugSetViewStyle("columns")
+                at(0.8) { pane()?.show(directory: root.appendingPathComponent("lnk")) }
+                at(2.0) { NSLog("RESIDUAL columnsShow %@ (lnk 기대: v1.2,v1.2-link,v1.2-link-복사본)", pane()?.debugBrowserColumn0() ?? "nil")
+                          wc.debugSetViewStyle("list") }
             }
         }
         // TF_SKIP_NOTICE=1 → '대치 폴더와 겹쳐 건너뜀' 안내만 단독 렌더(연속 시트는 캡처가 비어서, 2026-10-19)
