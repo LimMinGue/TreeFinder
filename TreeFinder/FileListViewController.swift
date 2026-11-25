@@ -361,10 +361,39 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     ///    선택이 비는 순간이 없어 미리보기에 '선택 없음'이 끼지 않는다. 그새 다른 행을 골랐으면 그 선택이 그대로 남는다.
     /// ② 미리보기에 알린다 — 편집 중인 마크다운의 저장 대상이 옛 경로로 남아 내용이 두 파일로 갈라지던 것.
     /// ③ 폴더면 다른 탭·페인에 알린다: 대소문자만 바꾼 폴더 안을 보던 페인은 옛 표기라 FSEvents가 끊긴다(0건 실측).
+    ///    옛·새 경로를 실어 보낸다 — 트리 노드·즐겨찾기 경로·그 안을 보던 탭이 따라간다(제작자 확정 2026-11-25).
     private func didRename(from old: URL, to renamed: URL, isDirectory: Bool) {
         renamedPaths[old.standardizedFileURL.path] = renamed.standardizedFileURL.path
         onRename?(old, renamed)
-        if isDirectory { NotificationCenter.default.post(name: .directoryRenamed, object: nil) }
+        if isDirectory {
+            NotificationCenter.default.post(name: .directoryRenamed, object: nil, userInfo: ["from": old, "to": renamed])
+        }
+    }
+
+    /// 폴더 이름이 바뀌거나(새 경로) 휴지통으로 가면(상위 폴더) 그 안을 보던 탭·히스토리가 옛 경로에 남아
+    /// '폴더 없음'이 뜨지 않게 따라간다 — 목록·트리·되돌리기 공용(제작자 확정 2026-11-25, 탐색기 동작).
+    /// 비교는 NFC — 트리 노드(디스크 열거)와 목록 경로(diskCased)의 정규화 차이를 흡수(refreshNode와 같은 방식).
+    private func followMovedFolder(_ old: URL, to replacement: (String) -> String) {
+        let oldKey = PathPasteboard.normalized(old.standardizedFileURL.path)
+        func moved(_ url: URL) -> URL {
+            guard url.isFileURL else { return url }
+            let key = PathPasteboard.normalized(url.standardizedFileURL.path)
+            guard key == oldKey || key.hasPrefix(oldKey + "/") else { return url }
+            return URL(fileURLWithPath: replacement(String(key.dropFirst(oldKey.count))))
+        }
+        backStack = backStack.map(moved)
+        forwardStack = forwardStack.map(moved)
+        for i in tabs.indices where i != activeTab {   // 활성 탭은 아래 show가 갱신
+            tabs[i].url = moved(tabs[i].url)
+            tabs[i].backStack = tabs[i].backStack.map(moved)
+            tabs[i].forwardStack = tabs[i].forwardStack.map(moved)
+        }
+        if let dir = directory, moved(dir) != dir {
+            navigatingViaHistory = true   // 따라가기일 뿐 — 히스토리에 쌓지 않음
+            show(directory: moved(dir), activate: false)
+        } else {
+            refreshTabBar()
+        }
     }
     private var renamedPaths: [String: String] = [:]   // 옛 경로 → 새 경로(다음 rebuildItems 1회)
     /// 이름 변경으로 이어 붙인 선택을 재발행하는 중 — onSelect 수신측이 미리보기 탭 전환을 생략하는 신호
@@ -554,7 +583,19 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         })
         // 다른 페인에서 폴더 이름 변경 → 이 페인의 경로 표기가 디스크와 대소문자만 달라졌으면 다시 연다(didRename)
         observers.append(NotificationCenter.default.addObserver(forName: .directoryRenamed, object: nil, queue: .main) {
-            [weak self] _ in self?.correctDirectoryCaseIfNeeded()
+            [weak self] note in
+            if let from = note.userInfo?["from"] as? URL, let to = note.userInfo?["to"] as? URL {
+                // 한 틱 뒤 — 트리가 같은 통지로 새 노드를 만든 다음이어야 show→reveal이 새 이름 행을 찾는다(관찰자 순서 비보장)
+                DispatchQueue.main.async { self?.followMovedFolder(from) { to.path + $0 } }
+            }
+            self?.correctDirectoryCaseIfNeeded()
+        })
+        // 폴더가 휴지통으로 가면(목록·트리) 그 안을 보던 탭은 지운 폴더의 상위로 (제작자 확정 2026-11-25)
+        observers.append(NotificationCenter.default.addObserver(forName: .directoryTrashed, object: nil, queue: .main) {
+            [weak self] note in
+            guard let url = note.userInfo?["url"] as? URL else { return }
+            let parent = url.deletingLastPathComponent().path
+            DispatchQueue.main.async { self?.followMovedFolder(url) { _ in parent } }
         })
         // 앱 복귀 시에도 — 외부 앱(Finder·터미널)이 조상 폴더의 대소문자만 바꾸면 통지가 없어 갱신이 멈춘다(출하 전 검증).
         // 트리 refreshTree와 같은 시점, 비용 = 페인당 diskCased 1회(약 0.13ms)
@@ -1848,8 +1889,15 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     private var editingURL: URL?   // 편집 대상 고정(행 번호는 재구성으로 밀린다) — controlTextDidEndEditing이 이걸로 찾는다
     private weak var editingIconItem: FileIconItem?   // 아이콘 뷰 인라인 rename 중인 셀 (제작자 지시 2026-07-25)
 
-    @objc func undo(_ sender: Any?) { fileUndoManager.undo() }
-    @objc func redo(_ sender: Any?) { fileUndoManager.redo() }
+    @objc func undo(_ sender: Any?) { (Self.fieldEditorUndoManager(in: view.window) ?? fileUndoManager).undo() }
+    @objc func redo(_ sender: Any?) { (Self.fieldEditorUndoManager(in: view.window) ?? fileUndoManager).redo() }
+
+    /// 이름·검색 칸 입력 중 ⌘Z = 입력 되돌리기. 응답 체인에서 뷰 컨트롤러가 NSWindow보다 먼저 undo:를 받아 **파일 작업**을
+    /// 되돌렸다(출하 전 검증 실측 — 입력 기록은 필드 편집기 쪽 매니저에 쌓임). 목록·트리 공용.
+    static func fieldEditorUndoManager(in window: NSWindow?) -> UndoManager? {
+        guard let editor = window?.firstResponder as? NSTextView, editor.isFieldEditor else { return nil }
+        return editor.undoManager
+    }
 
     var hasFileSelection: Bool { selectedURLs().contains(where: \.isFileURL) }   // 메뉴 검증(터미널에 경로 붙여넣기)
     /// 선택 항목 → 터미널 인자 (킬러 C3) — 창 컨트롤러가 미리보기 패널의 터미널로 중계
@@ -1877,10 +1925,14 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     /// 현재 폴더가 휴지통(홈 ~/.Trash 또는 볼륨 .Trashes) 안인가 — 휴지통은 "그냥 특이한 폴더"가 아니라 동사 집합이 다르다.
     var isInTrash: Bool {
         guard let dir = directory, dir.isFileURL else { return false }
-        let path = dir.standardizedFileURL.path
+        return Self.isTrashPath(dir.standardizedFileURL.path)
+    }
+
+    /// 휴지통 자신이거나 그 안인가 — 목록 현재 폴더·트리 폴더 공용 판정(규칙 4)
+    nonisolated static func isTrashPath(_ path: String) -> Bool {
         if let trash = FileManager.default.urls(for: .trashDirectory, in: .userDomainMask).first?.standardizedFileURL.path,
            path == trash || path.hasPrefix(trash + "/") { return true }
-        return path.contains("/.Trashes/")
+        return path.contains("/.Trashes/") || path.hasSuffix("/.Trashes")   // 볼륨 휴지통 루트 자신도
     }
 
     /// 목록 우클릭 "추출" — 선택된 착탈식 볼륨 전체 추출(Finder 규약, 제작자 확정 2026-07-25).
@@ -2024,11 +2076,20 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         fileUndoManager.registerUndo(withTarget: self) { target in
             target.registerUndoMove(current: original, original: current, action: action)
             let item = FileOperationEngine.Item(name: current.lastPathComponent) {
+                let isFolder = Self.isFolderOrLink(current.path)
                 try FileManager.default.moveItem(at: current, to: original)
-                return nil
+                // 다시 실행(⇧⌘Z)으로 휴지통에 다시 넣은 폴더 — 처음 휴지통 이동과 같은 통지(그 안을 보던 탭이 상위로, 출하 전 검증)
+                guard isFolder, Self.isTrashPath(original.path) else { return nil }
+                return { NotificationCenter.default.post(name: .directoryTrashed, object: nil, userInfo: ["url": current]) }
             }
             target.operationEngine.run(title: String(format: L("Undo %@"), action), items: [item],
-                                       in: target.view) { _ in target.reloadCurrentDirectory() }
+                                       in: target.view) { _ in
+                // 양쪽 부모의 트리 노드도 — 지금 보는 폴더 밖(트리에서 지운 폴더)을 되돌리면 트리에 안 나타났다(2026-11-25).
+                // 펼쳐 본 노드만 다시 읽어 I/O 없음이 기본(refreshNode).
+                target.onContentsChanged?(current.deletingLastPathComponent())
+                target.onContentsChanged?(original.deletingLastPathComponent())
+                target.reloadCurrentDirectory()
+            }
         }
         fileUndoManager.setActionName(action)
     }
@@ -2448,6 +2509,10 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         return lstat(path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFLNK
     }
 
+    /// 폴더 또는 링크 — 링크는 따라가지 않는다(죽은 네트워크 마운트를 가리키는 링크에서 stat이 직렬 작업 엔진을 막지 않게, 출하 전 검증).
+    /// 휴지통 통지 판정용: 링크면 트리 부모 갱신만 일어나고 탭 따라가기는 무연산(탭 경로는 해석된 실경로).
+    nonisolated static func isFolderOrLink(_ path: String) -> Bool { isSymlink(path) || isDirectory(path) }
+
     nonisolated static func isDirectory(_ path: String) -> Bool {
         var isDir: ObjCBool = false
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
@@ -2476,8 +2541,13 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
+    /// 키 창에서 편집 가능한 텍스트를 입력 중인가(이름·검색 칸·정보 창) — 읽기 전용 미리보기 텍스트는 아님.
+    /// 메뉴 단축키가 편집기보다 먼저 처리돼, 이름 입력 중 ⌘⌫(줄 앞 지우기)가 **편집 중인 그 파일**을 휴지통으로 보냈다
+    /// (출하 전 검증 — 목록은 응답 체인에서 창 컨트롤러보다 앞이라 창 쪽 메뉴 검증이 닿지 않음). 그래서 동작 첫 줄에서 거른다.
+    static var isEditingText: Bool { (NSApp.keyWindow?.firstResponder as? NSTextView)?.isEditable == true }
+
     @objc func duplicateSelected(_ sender: Any?) {
-        guard canModifyHere else { return }   // 네트워크 브라우즈·휴지통 안 (A10·A19)
+        guard canModifyHere, !Self.isEditingText else { return }   // 네트워크 브라우즈·휴지통 안 (A10·A19)
         let items = selectedURLs().map { duplicateItem($0, action: L("Duplicate")) }
         operationEngine.run(title: L("Duplicating items…"), items: items, in: view) { [weak self] _ in
             self?.reloadCurrentDirectory()
@@ -2485,15 +2555,26 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     @objc func deleteSelected(_ sender: Any?) {
-        guard fileOpsAllowed else { return }   // 네트워크 브라우즈 가상 항목 (A10)
+        guard fileOpsAllowed, !Self.isEditingText else { return }   // 네트워크 브라우즈 가상 항목 (A10) · 입력 중
         if isInTrash { deleteImmediately(); return }   // 휴지통 안 = "즉시 삭제…" + 확인 (PLAYBOOK §4.2, A19)
-        let items = selectedURLs().map { url in
+        moveToTrash(selectedURLs())
+    }
+
+    /// 휴지통 이동 단일 창구 — 목록 선택·트리 폴더 공용(진행 엔진·되돌려 놓기 기록·⌘Z, 제작자 지시 2026-11-25).
+    /// 폴더면 `.directoryTrashed` 통지 — 트리 노드 갱신·그 안을 보던 탭이 상위로 이동.
+    /// ponytail: 폴더 N개 일괄 = 통지 N회(트리는 펼쳐 본 부모만 다시 읽음). 느려지면 완료 시 1회로 묶기.
+    func moveToTrash(_ urls: [URL]) {
+        let items = urls.map { url in
             FileOperationEngine.Item(name: url.lastPathComponent) { [weak self] in
+                let isFolder = Self.isFolderOrLink(url.path)   // 옮기기 전에 판정(오프메인)
                 var trashed: NSURL?
                 try FileManager.default.trashItem(at: url, resultingItemURL: &trashed)
                 guard let trashedURL = trashed as URL? else { return nil }
                 RestoreRecords.record(trashed: trashedURL, original: url)   // 되돌려 놓기용 원위치 기록
-                return { self?.registerUndoMove(current: trashedURL, original: url, action: L("Move to Trash")) }
+                return {
+                    self?.registerUndoMove(current: trashedURL, original: url, action: L("Move to Trash"))
+                    if isFolder { NotificationCenter.default.post(name: .directoryTrashed, object: nil, userInfo: ["url": url]) }
+                }
             }
         }
         operationEngine.run(title: L("Moving to Trash…"), items: items, in: view) { [weak self] _ in
@@ -2644,9 +2725,23 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
+    /// 트리 폴더 이름 변경 — 목록 인라인 확정과 같은 창구(posixRename §38·되돌리기·이름 변경 통지, 제작자 지시 2026-11-25).
+    /// 빈 이름·무변경은 무연산. 트리·다른 페인·즐겨찾기 갱신은 didRename의 `.directoryRenamed` 통지가 맡는다.
+    func renameFolder(at url: URL, to newName: String) {
+        guard !newName.isEmpty, Self.diskName(fromDisplay: newName) != url.lastPathComponent else { return }
+        do {
+            let renamed = try Self.posixRename(url, toName: newName)
+            registerRenameUndo(current: renamed, originalName: url.lastPathComponent)
+            didRename(from: url, to: renamed, isDirectory: true)
+        } catch {
+            reportError(error)
+        }
+        reloadCurrentDirectory()
+    }
+
     @objc func renameSelected(_ sender: Any?) {
         // 검색 결과 중 rename 비활성 (제작자 지시 2026-07-23) · 네트워크 호스트·휴지통 안 rename 불가 (A10·A19)
-        guard searchResults == nil, canModifyHere else { return }
+        guard searchResults == nil, canModifyHere, !Self.isEditingText else { return }
         if viewStyle == .list {
             let row = tableView.selectedRow
             // makeIfNecessary: true — 방금 스크롤해 보이게 만든 행이라도 셀 뷰 생성은 다음 화면 갱신
@@ -3913,6 +4008,7 @@ final class FileListViewController: NSViewController, NSTableViewDataSource, NST
 }
 
 extension Notification.Name {
-    /// 폴더 이름이 바뀜(이름 변경·그 undo) — 대소문자만 바뀐 폴더 안을 보던 페인의 표기 교정용
-    static let directoryRenamed = Notification.Name("TFDirectoryRenamed")
+    /// 폴더 이름이 바뀜(목록·트리 이름 변경·그 undo/redo) — 페인 표기 교정·따라가기, 트리 노드·즐겨찾기 경로 갱신
+    static let directoryRenamed = Notification.Name("TFDirectoryRenamed")   // userInfo: from·to (URL)
+    static let directoryTrashed = Notification.Name("TFDirectoryTrashed")   // userInfo: url (휴지통 가기 전 경로)
 }

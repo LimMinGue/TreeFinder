@@ -37,6 +37,14 @@ enum SidebarSymbols {
 
     static func mappedName(forPath path: String) -> String? { special[path] }
 
+    /// 이름 변경·휴지통 금지 경로 = 특수 폴더 + 그 링크 대상. ~/Documents가 /Volumes/SSD_1T/Documents를 가리키는 기기에서
+    /// 볼륨 아래 실제 문서 폴더가 보호 밖이라 ⌘⌫ 한 번에 통째로 휴지통에 갈 수 있었다(출하 전 검증). 첫 사용 때 1회 계산
+    /// (readlink 체인 — 특수 폴더 링크 대상의 lstat 1회 포함).
+    private static let protectedPaths: Set<String> = Set(special.keys.flatMap { path in
+        [path, DirectoryLister.symlinkTarget(URL(fileURLWithPath: path))?.path].compactMap { $0 }.map(PathPasteboard.normalized)
+    })
+    static func isProtected(_ path: String) -> Bool { protectedPaths.contains(PathPasteboard.normalized(path)) }
+
     static func name(forPath path: String) -> String { special[path] ?? "folder" }
 
     static func image(forPath path: String) -> NSImage? {
@@ -57,6 +65,12 @@ final class FolderNode {
     /// 색 지정 폴더는 트리에서도 지정 색으로 (제작자 지시 2026-07-16 — 모노크롬 통일의 예외)
     let labelNumber: Int          // Finder 태그 → 심볼 틴트
     let hasCustomIcon: Bool       // 커스텀 아이콘(Icon\r) → 실제 아이콘 표시
+    /// 심링크 노드의 대상 경로(NFC) — 링크 아래 자식은 대상 경로로 만들어져, 부모 갱신이 대상 경로로 들어오면 링크 노드를
+    /// 못 찾았다(출하 전 검증: ~/Documents 링크 기기에서 이름 변경·휴지통 후 옛 행이 남음). symlinkTarget = readlink 체인
+    /// (체인 판정에 대상 lstat 1회 — 이 노드를 만든 열거의 resolvesToDirectory가 이미 대상 stat을 했으므로 새 위험 아님).
+    let aliasKey: String?
+    /// 경로 비교 키(NFC) 캐시 — 갱신 탐색이 폴더 감시마다(0.5초) 펼쳐 본 노드 전부를 훑으므로 매번 정규화하지 않게
+    let pathKey: String
     private var children: [FolderNode]?
 
     init(url: URL, symbolName: String? = nil, isLeaf: Bool = false) {
@@ -70,6 +84,8 @@ final class FolderNode {
         // 특수 폴더(매핑·명시 심볼)는 심볼 고정 — 아이콘 앱이 남긴 표준 모양 Icon\r을
         // 커스텀으로 오판해 파란 폴더가 되는 사례 방지 (제작자 제보 2026-07-16: 문서·다운로드)
         self.hasCustomIcon = Self.customIconExists(at: url, mapped: mapped)
+        self.aliasKey = DirectoryLister.symlinkTarget(url).map { PathPasteboard.normalized($0.path) }
+        self.pathKey = PathPasteboard.normalized(url.standardizedFileURL.path)
     }
 
     /// 커스텀 아이콘 판정 단일 소스 — init과 refreshChildren 재평가 공용(규칙 4)
@@ -131,8 +147,27 @@ final class FolderNode {
     }
 }
 
-final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
+/// 트리 Return·키패드 Enter = 선택 폴더 이름 변경 — 목록(TFTableView)과 같은 Finder 규약 (제작자 확정 2026-11-25)
+final class TFOutlineView: NSOutlineView {
+    var onReturn: (() -> Void)?
+    override func keyDown(with event: NSEvent) {
+        let code = Int(event.keyCode)
+        if code == 36 || code == 76, !event.modifierFlags.contains(.command), selectedRow >= 0 {
+            onReturn?(); return
+        }
+        super.keyDown(with: event)
+    }
+}
+
+final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate,
+                                      NSTextFieldDelegate {
     var onSelect: ((URL) -> Void)?
+    /// 트리 폴더 이름 변경·휴지통 — 실행은 활성 페인(FileListViewController.renameFolder·moveToTrash)이 맡는다:
+    /// posixRename(§38)·되돌려 놓기 기록·⌘Z를 목록과 같은 한 경로로 (제작자 지시 2026-11-25)
+    var onRenameFolder: ((URL, String) -> Void)?
+    var onTrashFolder: ((URL) -> Void)?
+    /// 트리 포커스에서도 ⌘Z — NSWindow만 undo:에 응답해(실측) 창 자신의 빈 매니저로 가던 것을 활성 페인 매니저로 중계
+    var activeUndoManager: (() -> UndoManager?)?
     /// "네트워크" 행 선택 — 목록을 네트워크 브라우즈로 (Finder 패리티, 워게임 network_browse)
     var onSelectNetwork: (() -> Void)?
     var onOpenInNewTab: ((URL) -> Void)?
@@ -142,8 +177,31 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
 
     private let favoritesGroup = SidebarGroup(L("Favorites"))
     private let locationsGroup = SidebarGroup(L("Locations"))
-    private let outlineView = NSOutlineView()
+    private let outlineView = TFOutlineView()
     private let dropStack = DropStackView()   // 프로퍼티 승격 — 드롭 완료 비움·검증 접근 (§9 ① 2026-07-23)
+
+    // 인라인 이름 편집 상태 — 편집 중 트리 재구성(폴더 감시 0.5초·앱 복귀·볼륨 변화)이 행을 다시 그리면 편집기가 닫히며
+    // 반쯤 친 이름이 확정된다(§30 같은 함정). 그동안 미뤘다가 끝나고 1회 실행 — 같은 종류는 키로 합친다.
+    private var editingNode: FolderNode?
+    private var editCancelled = false
+    private var editWidth: NSLayoutConstraint?   // 라벨 셀은 글자 폭만큼이라 편집 칸을 행 끝까지 넓힌다
+    private var deferredWork: [(key: String, work: () -> Void)] = []   // 순서 보존 — 같은 키는 최신 1건만
+    private weak var responderBeforeEdit: NSResponder?   // 확정·취소 후 돌려줄 포커스(우클릭으로 시작했으면 목록 그대로)
+
+    private func deferWhileEditing(_ key: String, _ work: @escaping () -> Void) -> Bool {
+        guard editingNode != nil else { return false }
+        // 같은 키는 빼고 맨 뒤로 — 제자리 교체는 P>Q·Q>P·P>Q(다시 실행) 순서를 뒤집어 즐겨찾기를 없는 경로로 되돌렸다(2차 검증)
+        deferredWork.removeAll { $0.key == key }
+        deferredWork.append((key, work))
+        return true
+    }
+
+    /// 미룬 작업 실행 — 이름 변경 반영이 먼저(트리 전체 새로 고침이 먼저 돌면 옛 노드가 사라져 펼침 유지가 실패, 출하 전 검증)
+    private func runDeferredWork() {
+        let work = deferredWork
+        deferredWork = []
+        (work.filter { $0.key.hasPrefix("renamed") } + work.filter { !$0.key.hasPrefix("renamed") }).forEach { $0.work() }
+    }
 
     /// Locations = 홈 + 로컬 볼륨 + 네트워크(컨테이너) + 휴지통 (제작자 지시 2026-07-16)
     private var localLocations: [FolderNode] = FolderTreeViewController.buildLocalLocations()
@@ -217,6 +275,7 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         // 이미 선택된 행 재클릭도 이동해야 함(Finder 규약) — 선택 변경 통지만으로는 재클릭이 무반응
         outlineView.target = self
         outlineView.action = #selector(rowClicked)
+        outlineView.onReturn = { [weak self] in self?.renameSelectedFolder() }
 
         let menu = NSMenu()
         menu.delegate = self
@@ -263,11 +322,7 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         }
         // 볼륨 스냅숏 준비/변화(마운트·언마운트·추출) → Locations 재구성(노드 재사용 = 홈 확장 보존) + ⏏ 버튼 재렌더
         NotificationCenter.default.addObserver(forName: VolumeMonitor.changed, object: nil, queue: .main) {
-            [weak self] _ in
-            guard let self else { return }
-            self.localLocations = Self.buildLocalLocations(reusing: self.localLocations)
-            self.outlineView.reloadItem(self.locationsGroup, reloadChildren: true)
-            self.outlineView.expandItem(self.locationsGroup)
+            [weak self] _ in self?.rebuildLocations()
         }
         _ = VolumeMonitor.shared   // 스냅숏 부트스트랩(첫 refresh 트리거 — 옵저버 등록 후)
         // 다른 앱·터미널에서 폴더 이름을 바꾸고 TreeFinder로 돌아오는 순간 트리 최신화 (제작자 제보 2026-07-25).
@@ -287,14 +342,17 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         }
         // 숨김 표시 토글 등 설정 변경 → 트리 전체 재구성(FolderNode 캐시 무효화 — 목록과 동일 소스, 제작자 지적)
         NotificationCenter.default.addObserver(forName: .settingsChanged, object: nil, queue: .main) {
-            [weak self] _ in
-            guard let self else { return }
-            self.localLocations = Self.buildLocalLocations()
-            self.trashNode = Self.makeTrashNode()
-            self.outlineView.reloadData()
-            self.outlineView.expandItem(self.favoritesGroup)
-            self.outlineView.expandItem(self.locationsGroup)
-            self.outlineView.expandItem(self.localLocations.first)
+            [weak self] _ in self?.rebuildAll()
+        }
+        // 폴더 이름 변경(목록·트리·되돌리기 공용 통지) → 부모 노드·펼침·즐겨찾기 경로 (제작자 확정 2026-11-25)
+        NotificationCenter.default.addObserver(forName: .directoryRenamed, object: nil, queue: .main) { [weak self] note in
+            guard let from = note.userInfo?["from"] as? URL, let to = note.userInfo?["to"] as? URL else { return }
+            self?.folderRenamed(from: from, to: to)
+        }
+        // 폴더 휴지통 이동 → 부모 노드에서 사라지게 (지금 보는 폴더 밖이어도 — 트리에서 지운 경우)
+        NotificationCenter.default.addObserver(forName: .directoryTrashed, object: nil, queue: .main) { [weak self] note in
+            guard let url = note.userInfo?["url"] as? URL else { return }
+            self?.refreshNode(at: url.deletingLastPathComponent())
         }
         #if DEBUG
         // TF_DUMP_TREE=1 → 트리 구성 로그 검증(창 서버·비브런시 캡처가 백지인 환경의 대안 경로)
@@ -317,6 +375,25 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
             }
         }
         #endif
+    }
+
+    /// 볼륨 스냅숏 변화 → Locations 재구성(노드 재사용 = 홈 확장 보존). 편집 중이면 끝나고.
+    private func rebuildLocations() {
+        if deferWhileEditing("volumes", { [weak self] in self?.rebuildLocations() }) { return }
+        localLocations = Self.buildLocalLocations(reusing: localLocations)
+        outlineView.reloadItem(locationsGroup, reloadChildren: true)
+        outlineView.expandItem(locationsGroup)
+    }
+
+    /// 설정 변경(숨김 표시 등) → 트리 전체 재구성. 편집 중이면 끝나고.
+    private func rebuildAll() {
+        if deferWhileEditing("settings", { [weak self] in self?.rebuildAll() }) { return }
+        localLocations = Self.buildLocalLocations()
+        trashNode = Self.makeTrashNode()
+        outlineView.reloadData()
+        outlineView.expandItem(favoritesGroup)
+        outlineView.expandItem(locationsGroup)
+        outlineView.expandItem(localLocations.first)
     }
 
     // MARK: NSOutlineViewDataSource
@@ -517,6 +594,8 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
 
     /// View ▸ Expand to Open Folder — 탐색을 따라 트리를 펼치고 선택 (원본 1.1.2)
     func reveal(_ url: URL) {
+        // 편집 중이면 끝나고 — 행 선택이 편집기를 닫아 반쯤 친 이름이 확정된다(다른 창의 휴지통 따라가기·탐색 키, 출하 전 검증)
+        if deferWhileEditing("reveal", { [weak self] in self?.reveal(url) }) { return }
         // 홈뿐 아니라 **볼륨 루트까지** 후보 — 심링크가 홈 밖(다른 볼륨)을 가리켜도 트리가 따라온다
         // (제작자 확정 2026-08-06, §32. 이 기기: ~/Documents → /Volumes/SSD_1T/Documents).
         // 가장 긴 접두(= 가장 구체적인 루트)를 고른다 — 홈과 "/"가 동시에 맞으면 홈이 이긴다.
@@ -544,16 +623,17 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     /// (제작자 지시 2026-07-23 — 트리 자동 새로고침). materialize(펼쳐본)된 노드만 대상, 없으면 무연산.
     /// 한계: FSEvents는 현재 보고 있는 폴더 하나만 감시하므로, 그 밖 위치의 폴더 변경은 여전히 미반영.
     func refreshNode(at url: URL) {
+        // 편집 중 = 끝나고 트리 전체 1회(refreshTree가 이 노드도 덮는다 — 0.5초마다 와도 한 번)
+        if deferWhileEditing("tree", { [weak self] in self?.refreshTree() }) { return }
         let target = PathPasteboard.normalized(url.standardizedFileURL.path)
-        // 변화가 있을 때만 reloadItem — 하위 활동이 잦은 폴더에서 주기적 깜빡임 방지 (제작자 제보 2026-07-23)
-        if let node = materializedNode(matching: target), node.refreshChildren() {
-            outlineView.reloadItem(node, reloadChildren: true)
-        }
         // 자신의 행(태그·커스텀 아이콘)은 부모의 자식 목록이 그림 — 부모도 재평가 (제작자 제보 2026-07-23)
         let parent = PathPasteboard.normalized(
             url.deletingLastPathComponent().standardizedFileURL.path)
-        if parent != target, let parentNode = materializedNode(matching: parent), parentNode.refreshChildren() {
-            outlineView.reloadItem(parentNode, reloadChildren: true)
+        // 같은 폴더가 링크 노드·실경로 노드 두 곳에 보일 수 있어 일치 노드 전부.
+        // 변화가 있을 때만 reloadItem — 하위 활동이 잦은 폴더에서 주기적 깜빡임 방지 (제작자 제보 2026-07-23)
+        for node in materializedNodes(matching: target) + (parent != target ? materializedNodes(matching: parent) : [])
+        where node.refreshChildren() {
+            outlineView.reloadItem(node, reloadChildren: true)
         }
     }
 
@@ -565,6 +645,7 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     /// - 미로드 노드는 건너뜀(다음 loadChildren이 최신). 비로컬 볼륨은 **하위로 내려가지 않음**
     ///   — 동기 리스팅이라 죽은 네트워크 마운트에서 메인 스레드가 얼어붙는다(§3, 같은 함정 4회째 방어).
     func refreshTree() {
+        if deferWhileEditing("tree", { [weak self] in self?.refreshTree() }) { return }
         var stack = localLocations
         while let node = stack.popLast() {
             guard node.loadedChildren != nil, !VolumeMonitor.shared.isNonLocal(node.url) else { continue }
@@ -574,14 +655,47 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         }
     }
 
+    /// 폴더 이름 변경 반영 — 새 이름 노드는 새 객체라 펼침이 풀리므로 이어 주고, 즐겨찾기 경로도 따라간다
+    /// (휴지통 이동은 즐겨찾기를 그대로 둔다 — ⌘Z로 되살리면 다시 작동, 제작자 확정 2026-11-25).
+    private func folderRenamed(from: URL, to: URL) {
+        // 이벤트마다 따로 쌓는다 — 한 키로 합치면 편집 중 두 번째 이름 변경이 첫 번째의 즐겨찾기 경로 수정을 지웠다(출하 전 검증)
+        if deferWhileEditing("renamed:\(from.path)>\(to.path)", { [weak self] in self?.folderRenamed(from: from, to: to) }) { return }
+        let fromKey = PathPasteboard.normalized(from.standardizedFileURL.path)
+        // 같은 폴더가 링크 아래·실경로 아래 두 곳에 노드로 있을 수 있어 일치 노드 전부를 본다
+        let wasExpanded = materializedNodes(matching: fromKey).contains { outlineView.isItemExpanded($0) }
+        refreshNode(at: from.deletingLastPathComponent())
+        if wasExpanded {
+            materializedNodes(matching: PathPasteboard.normalized(to.standardizedFileURL.path)).forEach { outlineView.expandItem($0) }
+        }
+        // 저장된 배열을 기준으로 고친다 — 창마다 메모리 배열을 저장하면 다른 창에서 추가한 즐겨찾기를 덮어썼다(출하 전 검증).
+        // 같은 통지를 받은 다른 창은 이미 고쳐진 값을 읽어 메모리만 맞춘다.
+        let saved = UserDefaults.standard.stringArray(forKey: Self.favoritesKey) ?? favorites.map(\.url.path)
+        let rewritten = saved.map { path -> String in
+            let key = PathPasteboard.normalized(path)
+            guard key == fromKey || key.hasPrefix(fromKey + "/") else { return path }
+            return to.path + key.dropFirst(fromKey.count)
+        }
+        if rewritten != saved { UserDefaults.standard.set(rewritten, forKey: Self.favoritesKey) }
+        if favorites.map(\.url.path) != rewritten {
+            favorites = rewritten.map { FavoriteItem(URL(fileURLWithPath: $0)) }
+            outlineView.reloadItem(favoritesGroup, reloadChildren: true)
+        }
+    }
+
     /// 트리에 실재하는 루트(홈·볼륨)와 이미 로드된 하위만 순회해 경로 일치 노드를 찾는다(미로드 노드 강제 로드 금지).
-    private func materializedNode(matching normalizedPath: String) -> FolderNode? {
+    /// 심링크 노드는 링크 대상 경로로도 일치(aliasKey).
+    private func materializedNodes(matching normalizedPath: String) -> [FolderNode] {
+        var found: [FolderNode] = []
         var stack = localLocations   // 휴지통은 잎이라 제외, 즐겨찾기는 FolderNode 아님
         while let node = stack.popLast() {
-            if PathPasteboard.normalized(node.url.standardizedFileURL.path) == normalizedPath { return node }
+            if node.pathKey == normalizedPath || node.aliasKey == normalizedPath { found.append(node) }
             if let loaded = node.loadedChildren { stack.append(contentsOf: loaded) }
         }
-        return nil
+        return found
+    }
+
+    private func materializedNode(matching normalizedPath: String) -> FolderNode? {
+        materializedNodes(matching: normalizedPath).first
     }
 
     #if DEBUG
@@ -620,6 +734,40 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
 
     /// TF_TREE_NETWORK — 네트워크 그룹 확장(Bonjour 시작) 후 자식 구성을 로그로 확인
     func debugExpandNetwork() { outlineView.expandItem(networkGroup) }
+
+    // TF_TREE_EDIT — 트리 이름 변경·휴지통·키 경로 E2E (제작자 지시 2026-11-25)
+    private func debugNode(_ url: URL) -> FolderNode? {   // 화면에 보이는 노드 우선(링크·실경로 두 곳에 있을 수 있음)
+        let nodes = materializedNodes(matching: PathPasteboard.normalized(url.standardizedFileURL.path))
+        return nodes.first { outlineView.row(forItem: $0) >= 0 } ?? nodes.first
+    }
+    func debugBeginRename(_ url: URL) {   // 메뉴 '이름 변경'과 같은 진입
+        guard let node = debugNode(url) else { NSLog("TREE_EDIT begin: 노드 미발견 %@", url.path); return }
+        if editingNode == nil, outlineView.row(forItem: node) < 0 {
+            NSLog("TREE_EDIT begin: 행 없음 %@ (부모 펼침=%d)", url.path,
+                  outlineView.parent(forItem: node).map { outlineView.isItemExpanded($0) ? 1 : 0 } ?? -1)
+        }
+        beginRename(node)
+    }
+    func debugEditState() -> String {
+        let responder = view.window?.firstResponder
+        let editor = responder as? NSTextView
+        return "editing=\(editingNode?.name ?? "nil") responder=\(responder.map { String(describing: type(of: $0)) } ?? "nil")"
+            + " text=\(editor?.string ?? "-") sel=\(editor.map { NSStringFromRange($0.selectedRange()) } ?? "-")"
+            + " deferred=\(deferredWork.map { $0.key.hasPrefix("renamed") ? "renamed" : $0.key })"
+    }
+    /// 트리 선택 + 포커스(목록 이동 억제) — 키 경로 검증용
+    func debugSelectNode(_ url: URL) {
+        guard let node = debugNode(url) else { NSLog("TREE_EDIT select: 노드 미발견 %@", url.path); return }
+        isRevealing = true
+        outlineView.selectRowIndexes(IndexSet(integer: outlineView.row(forItem: node)), byExtendingSelection: false)
+        isRevealing = false
+        view.window?.makeFirstResponder(outlineView)
+    }
+    func debugIsExpanded(_ url: URL) -> Bool { debugNode(url).map { outlineView.isItemExpanded($0) } ?? false }
+    func debugFavoritePaths() -> [String] { favorites.map(\.url.path) }
+    func debugRemoveFavorite(path: String) {
+        if let favorite = favorites.first(where: { $0.url.path == path }) { remove(favorite: favorite) }
+    }
 
     /// TF_TREE_CLICK — 홈 행 중심 좌표(창 기준) — 합성 클릭으로 A16(이중 발화) 회귀 검증
     func debugHomeRowPoint() -> NSPoint? {
@@ -766,6 +914,17 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
         menu.addItem(entry(L("Open in New Window"), "macwindow.badge.plus", #selector(openInNewWindow(_:))))
         menu.addItem(entry(L("Open in Terminal"), "terminal", #selector(openInTerminal(_:))))
         menu.addItem(.separator())
+        // 이름 변경·휴지통 — 목록 메뉴와 같은 용어·심볼·상대 순서(경로 복사 위). 특수 폴더·즐겨찾기 행은 회색
+        // (숨기지 않음 — 목록의 '파일에서 폴더 전용 항목 회색'과 같은 규칙, 제작자 확정 2026-11-25)
+        let modifiable = modifiableFolder(item)
+        for (title, symbol, action) in [(L("Rename"), "character.cursor.ibeam", #selector(renameFolderMenu(_:))),
+                                        (L("Move to Trash"), "trash", #selector(trashFolderMenu(_:)))] {
+            let mi = entry(title, symbol, action)
+            mi.representedObject = modifiable
+            mi.isEnabled = modifiable != nil
+            menu.addItem(mi)
+        }
+        menu.addItem(.separator())
         // 목록 메뉴와 동일 용어·심볼 — 트리 폴더도 경로 복사 (제작자 지시 2026-07-24)
         menu.addItem(entry(L("Copy Path"), "link", #selector(copyPathAction(_:))))
         menu.addItem(.separator())
@@ -876,6 +1035,120 @@ final class FolderTreeViewController: NSViewController, NSOutlineViewDataSource,
     }
 
     @objc private func refreshTreeMenu(_ sender: Any?) { refreshTree() }
+
+    // MARK: 이름 변경 · 휴지통 (제작자 지시 2026-11-25)
+
+    /// 이름 변경·휴지통 대상 = 트리의 일반 폴더만. 제외: 루트(홈·볼륨·/)·휴지통과 그 안·
+    /// 특수 폴더(데스크탑·문서 등 심볼 매핑 — Finder도 못 바꾼다)·즐겨찾기 행(바로가기).
+    private func modifiableFolder(_ item: Any?) -> FolderNode? {
+        guard let node = item as? FolderNode, node !== trashNode,
+              !localLocations.contains(where: { $0 === node }),
+              !SidebarSymbols.isProtected(node.url.path),
+              !FileListViewController.isTrashPath(node.url.standardizedFileURL.path) else { return nil }
+        return node
+    }
+
+    private var selectedItem: Any? { outlineView.item(atRow: outlineView.selectedRow) }
+    /// 창 컨트롤러의 키 분기용 — 트리 포커스 ⌘⌫·⌘R은 트리 폴더가 대상 (제작자 확정 2026-11-25)
+    var isFocused: Bool { view.window?.firstResponder === outlineView }
+    var canModifySelectedFolder: Bool { modifiableFolder(selectedItem) != nil }
+
+    func renameSelectedFolder() {
+        if let node = modifiableFolder(selectedItem) { beginRename(node) }
+    }
+
+    func trashSelectedFolder() {
+        if let node = modifiableFolder(selectedItem) { onTrashFolder?(node.url) }
+    }
+
+    @objc private func renameFolderMenu(_ sender: NSMenuItem) {
+        if let node = sender.representedObject as? FolderNode { beginRename(node) }
+    }
+
+    @objc private func trashFolderMenu(_ sender: NSMenuItem) {
+        if let node = sender.representedObject as? FolderNode { onTrashFolder?(node.url) }
+    }
+
+    // 이름 입력 중이면 입력 되돌리기 — 아니면 활성 페인의 파일 작업 (목록과 같은 판정)
+    @objc func undo(_ sender: Any?) {
+        (FileListViewController.fieldEditorUndoManager(in: view.window) ?? activeUndoManager?())?.undo()
+    }
+    @objc func redo(_ sender: Any?) {
+        (FileListViewController.fieldEditorUndoManager(in: view.window) ?? activeUndoManager?())?.redo()
+    }
+
+    /// 그 행에서 바로 편집 — 표시는 로컬라이즈드 이름이지만 편집 칸은 실제 디스크 이름(':'→'/', Finder 규약)
+    private func beginRename(_ node: FolderNode) {
+        guard editingNode == nil else { return }
+        let row = outlineView.row(forItem: node)
+        guard row >= 0 else { return }
+        outlineView.scrollRowToVisible(row)
+        // makeIfNecessary: true — 방금 스크롤한 행은 셀이 아직 없어 편집이 조용히 취소된다(목록 §30 실측과 같은 함정)
+        guard let cell = outlineView.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView,
+              let field = cell.textField else { return }
+        responderBeforeEdit = view.window?.firstResponder
+        editingNode = node
+        editCancelled = false
+        field.stringValue = FileListViewController.displayName(fromDisk: node.url.lastPathComponent)
+        editWidth = field.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2)
+        editWidth?.isActive = true
+        field.isEditable = true
+        field.delegate = self
+        // 진입 실패면 상태를 되돌린다 — editingNode가 남으면 트리 갱신이 끝없이 보류된다(출하 전 검증)
+        guard view.window?.makeFirstResponder(field) == true else {
+            resetEditField(field, name: node.name)
+            return
+        }
+        field.currentEditor()?.selectAll(nil)   // 폴더 = 이름 전체('2026.10 자료'가 '2026'만 잡히던 것 — 출하 전 검증)
+    }
+
+    private func resetEditField(_ field: NSTextField, name: String) {
+        editingNode = nil
+        field.isEditable = false
+        field.delegate = nil
+        editWidth?.isActive = false
+        editWidth = nil
+        field.stringValue = name   // 표시 이름 복원 — 바뀌면 이름 변경 통지가 새 노드로 다시 그린다(실패해도 원래대로)
+    }
+
+    /// 확정·취소 뒤 포커스 — 편집 전 자리(트리에서 Enter로 시작 = 트리, 목록 작업 중 우클릭 = 목록). 종전엔 늘 트리로 옮겨
+    /// 이어서 목록 파일을 지우려던 ⌘⌫가 트리의 현재 폴더를 지울 수 있었다(출하 전 검증).
+    private var focusAfterEdit: NSResponder {
+        if let previous = responderBeforeEdit, !(previous is NSText),
+           (previous as? NSView)?.window === view.window { return previous }
+        return outlineView
+    }
+
+    /// Esc = 취소 (Return·Tab·바깥 클릭 = 확정 — 목록과 같은 Finder 규약)
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard editingNode != nil, commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        editCancelled = true
+        view.window?.makeFirstResponder(focusAfterEdit)   // 편집 종료 → controlTextDidEndEditing(취소 표식)
+        return true
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField, let node = editingNode else { return }
+        let newName = field.stringValue
+        resetEditField(field, name: node.name)
+        // Return·Tab은 편집 전 자리로 포커스 복귀(키보드 계속), 바깥 클릭은 사용자가 고른 곳을 그대로 둔다.
+        // 아래 지연 블록에서 — 지금 옮기면 아웃라인 뷰가 편집 종료 처리 끝에 자기를 다시 첫 응답자로 만든다(실측)
+        let movement = notification.userInfo?["NSTextMovement"] as? Int
+        let restoreFocus = movement == NSTextMovement.return.rawValue || movement == NSTextMovement.tab.rawValue
+        let focusTarget = focusAfterEdit
+        // 확정·미룬 작업은 마우스 추적이 끝난 뒤(기본 모드) — 다른 행을 클릭해 편집이 끝나면 mouseDown 도중 행이 바뀌어
+        // 테이블이 클릭 때 잡은 행 번호로 **엉뚱한 폴더**를 선택·이동했다(출하 전 검증 실측). reloadItem은 선택을 항목 기준으로 유지.
+        let url = node.url
+        let cancelled = editCancelled
+        RunLoop.main.perform(inModes: [.default]) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if restoreFocus { self.view.window?.makeFirstResponder(focusTarget) }
+                if !cancelled { self.onRenameFolder?(url, newName) }   // 빈 이름·무변경은 받는 쪽이 거른다
+                self.runDeferredWork()
+            }
+        }
+    }
 
     @objc private func copyPathAction(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }

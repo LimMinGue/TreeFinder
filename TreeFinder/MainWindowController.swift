@@ -144,9 +144,18 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         // 파일 조작 메뉴 — 네트워크 브라우즈(가상 목록)·휴지통 안에선 비활성/동사 교체 (2026-09-05 A10·A19)
-        case #selector(newFolder(_:)), #selector(newTextDocument(_:)), #selector(renameSelected(_:)):
+        case #selector(newFolder(_:)), #selector(newTextDocument(_:)):
+            return listController?.canModifyHere ?? false
+        case #selector(renameSelected(_:)):
+            if keyOutsideFileArea { return false }
+            if treeKeyTarget { return !isKeyRepeat && (treeController?.canModifySelectedFolder ?? false) }
             return listController?.canModifyHere ?? false
         case #selector(deleteSelected(_:)):
+            if keyOutsideFileArea { return false }
+            if treeKeyTarget {
+                menuItem.title = L("Move to Trash")
+                return !isKeyRepeat && (treeController?.canModifySelectedFolder ?? false)
+            }
             menuItem.title = (listController?.isInTrash ?? false) ? L("Delete Immediately…") : L("Move to Trash")
             return listController?.fileOpsAllowed ?? false
         case #selector(toggleShowHidden(_:)):
@@ -169,6 +178,8 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
             return terminalFocused
         case #selector(toggleTerminalFollow(_:)):
             menuItem.state = UserDefaults.standard.bool(forKey: SettingsKeys.terminalFollowsCwd) ? .on : .off
+        case #selector(duplicateSelected(_:)) where keyOutsideFileArea:   // 터미널·이름 칸 등에서 ⌘D가 목록 선택을 복제하던 것
+            return false
         case #selector(pasteSelectionIntoTerminal(_:)), #selector(duplicateSelected(_:)):
             return (listController?.fileOpsAllowed ?? false) && (listController?.hasFileSelection ?? false)
         case #selector(newFolderWithSelection(_:)):
@@ -230,12 +241,21 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
 
     // 도구모음·메뉴가 포커스 위치와 무관하게 동작하도록 윈도우 컨트롤러가 중계
     @objc func newFolder(_ sender: Any?) { listController?.newFolder(sender) }
-    @objc func deleteSelected(_ sender: Any?) { listController?.deleteSelected(sender) }
+    @objc func deleteSelected(_ sender: Any?) {
+        if treeKeyTarget {   // 트리 포커스 ⌘⌫ = 트리 폴더
+            if !isKeyRepeat { treeController?.trashSelectedFolder() }
+            return
+        }
+        listController?.deleteSelected(sender)
+    }
     @objc func newTextDocument(_ sender: Any?) { listController?.newTextDocument(sender) }
     @objc func restoreSelected(_ sender: Any?) { listController?.restoreSelected(sender) }
     @objc func emptyTrash(_ sender: Any?) { listController?.emptyTrash(sender) }   // File 메뉴·사이드바(응답 체인)
     @objc func openSelected(_ sender: Any?) { listController?.openSelected() }
-    @objc func renameSelected(_ sender: Any?) { listController?.renameSelected(sender) }
+    @objc func renameSelected(_ sender: Any?) {
+        if treeKeyTarget { treeController?.renameSelectedFolder(); return }   // 트리 포커스 ⌘R = 트리 폴더
+        listController?.renameSelected(sender)
+    }
     @objc func getInfoSelected(_ sender: Any?) { listController?.getInfoSelected(sender) }
     @objc func closeTab(_ sender: Any?) {
         if terminalFocused && invokedByKey { previewController?.closeActiveTerminalTab(); return }   // 터미널 포커스 ⌘W = 터미널 탭 닫기
@@ -254,6 +274,20 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
     // 메뉴를 마우스로 고르면(currentEvent ≠ keyDown) 제목 그대로의 동작 — 제목과 동작이 어긋나지 않게(디자이너).
     private var terminalFocused: Bool { window?.firstResponder is DropTerminalView }
     private var invokedByKey: Bool { NSApp.currentEvent?.type == .keyDown }
+    /// 트리 포커스에서 ⌘ 단축키로 부른 ⌘⌫·⌘R = 트리 폴더가 대상 — 종전엔 목록 선택 파일이 휴지통으로 갔다(제작자 확정 2026-11-25).
+    /// 메뉴·도구모음을 마우스로 고르면 종전대로 목록(터미널 분기와 같은 규칙). ⌘ 조건 = 마우스로 연 메뉴를 Return으로
+    /// 고르는 경우를 단축키로 오인하지 않게, 키 창 조건 = 정보 창 등 보조 창의 키가 넘어와도 트리를 건드리지 않게(출하 전 검증).
+    private var treeKeyTarget: Bool {
+        guard let event = NSApp.currentEvent, event.type == .keyDown, event.modifierFlags.contains(.command) else { return false }
+        return window?.isKeyWindow == true && treeController?.isFocused == true
+    }
+    /// 반복 키 무시 — ⌘⌫를 누르고 있으면 휴지통 이동 → 목록이 상위로 → 트리 선택도 상위로 옮겨 **상위 폴더가 연쇄로** 지워졌다(출하 전 검증 실측)
+    private var isKeyRepeat: Bool { NSApp.currentEvent.map { $0.type == .keyDown && $0.isARepeat } ?? false }
+    /// 키로 부른 이름 변경·휴지통·복제가 여기(창 컨트롤러)까지 왔는데 트리 대상도 아니면 = 포커스가 파일 영역 밖
+    /// (터미널·마크다운 편집기·이름/검색 칸·다른 창). 포커스가 목록이면 목록 컨트롤러가 응답 체인에서 먼저 받아 여기 안 온다.
+    /// 종전엔 메뉴 단축키가 편집기보다 먼저 처리돼 이런 곳의 ⌘⌫(줄 앞 지우기)가 **목록 선택 파일을 휴지통으로** 보냈다(출하 전 검증).
+    /// 마우스로 고른 메뉴는 종전대로 목록. 꺼진 항목은 키만 삼킨다(편집 칸의 ⌘⌫ 줄 지우기는 동작하지 않음 — 안전 우선).
+    private var keyOutsideFileArea: Bool { invokedByKey && !treeKeyTarget }
     @objc func newTerminalTab(_ sender: Any?) { previewController?.newTerminalTabFromMenu() }
     @objc func closeTerminalTab(_ sender: Any?) { previewController?.closeActiveTerminalTab() }
     @objc func clearTerminalBuffer(_ sender: Any?) { previewController?.clearActiveTerminalBuffer() }
@@ -504,6 +538,18 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
     func debugRevealTree(_ url: URL) {   // TF_TREE_REFRESH — 네트워크 첫 갱신 정착 후 노드 확장(정상 상태 재현)
         treeController?.reveal(url)
     }
+
+    // TF_TREE_EDIT — 트리 이름 변경·휴지통·키 경로 (제작자 지시 2026-11-25)
+    func debugTreeBeginRename(_ url: URL) { treeController?.debugBeginRename(url) }
+    func debugTreeEditState() -> String { treeController?.debugEditState() ?? "nil" }
+    func debugTreeSelect(_ url: URL) { treeController?.debugSelectNode(url) }
+    func debugTreeIsExpanded(_ url: URL) -> Bool { treeController?.debugIsExpanded(url) ?? false }
+    func debugTreeFavorites() -> [String] { treeController?.debugFavoritePaths() ?? [] }
+    func debugTreeAddFavorite(_ url: URL) { treeController?.addFavorite(url: url) }
+    func debugTreeRemoveFavorite(_ path: String) { treeController?.debugRemoveFavorite(path: path) }
+    func debugTreeRefreshNode(_ url: URL) { treeController?.refreshNode(at: url) }
+    func debugListMessage() -> String { listController?.debugMessageText() ?? "" }
+    func debugSelectListItem(_ name: String) { listController?.debugSelectNamed(name) }
 
     // TF_TREE_MANUAL — 외부 이름 변경 후 사용자 새로 고침·메뉴 구성 검증 (제작자 제보 2026-07-25)
     func debugRefreshTree() { treeController?.refreshTree() }
@@ -806,6 +852,10 @@ final class MainWindowController: NSWindowController, NSMenuItemValidation, NSTo
         tree.onDropFiles = { [weak self] sources, target, forceCopy, stack in
             self?.listController?.performDrop(sources, into: target, forceCopy: forceCopy, stackSource: stack)
         }
+        // 트리 폴더 이름 변경·휴지통 = 활성 페인의 같은 창구(되돌리기 기록도 그 페인에) (제작자 지시 2026-11-25)
+        tree.onRenameFolder = { [weak self] url, name in self?.listController?.renameFolder(at: url, to: name) }
+        tree.onTrashFolder = { [weak self] url in self?.listController?.moveToTrash([url]) }
+        tree.activeUndoManager = { [weak self] in self?.listController?.undoManager }
 
         let split = NSSplitViewController()
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: tree)

@@ -583,6 +583,183 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
+        // TF_TREE_EDIT=<부모>/<대상> → (TF_START_DIR 병용, 홈 아래 · 셸이 <대상>/안쪽/목록선택.txt 픽스처 생성)
+        // 트리 폴더 이름 변경·Esc 취소·⌘Z·⌘⌫·Return 키 경로와 목록 따라가기·즐겨찾기 경로를 로그로 검증 (제작자 지시 2026-11-25).
+        // 주의: 즐겨찾기는 설치본과 같은 UserDefaults — 셸이 FavoriteURLs를 백업·복원한다.
+        if let spec = ProcessInfo.processInfo.environment["TF_TREE_EDIT"] {
+            let parts = spec.split(separator: "/").map(String.init)
+            if parts.count == 2 {
+                let parent = startDirectory.appendingPathComponent(parts[0])
+                let target = parent.appendingPathComponent(parts[1])
+                let renamed = parent.appendingPathComponent(parts[1] + "-새이름")
+                let inner = target.appendingPathComponent("안쪽")
+                func at(_ t: Double, _ work: @escaping () -> Void) { DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: work) }
+                func disk() -> String { ((try? FileManager.default.contentsOfDirectory(atPath: parent.path)) ?? []).sorted().joined(separator: ",") }
+                func key(_ chars: String, _ code: UInt16, _ flags: NSEvent.ModifierFlags, repeat isRepeat: Bool = false) {
+                    // 합성 키는 앱이 활성·창이 키일 때만 메뉴 단축키로 간다 — 셸에서 띄운 앱은 활성이 아닐 수 있다(실측)
+                    NSApp.activate(ignoringOtherApps: true)
+                    wc.window?.makeKeyAndOrderFront(nil)
+                    if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+                                                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: wc.window?.windowNumber ?? 0,
+                                                context: nil, characters: chars, charactersIgnoringModifiers: chars,
+                                                isARepeat: isRepeat, keyCode: code) { NSApp.postEvent(e, atStart: false) }
+                }
+                func exists(_ url: URL) -> Int { FileManager.default.fileExists(atPath: url.path) ? 1 : 0 }
+                let listFile = parent.appendingPathComponent("부모목록.txt")   // 셸 픽스처 — 편집 중 ⌘⌫ 오삭제 검증용
+                let link = startDirectory.appendingPathComponent("링크")       // 셸 픽스처: 링크 → 실제, 실제/링크자식
+                let linkChild = startDirectory.appendingPathComponent("실제/링크자식")
+                func state(_ label: String) {
+                    NSLog("TREE_EDIT %@ key=%d disk=[%@] tree=[%@] dir=%@ msg=[%@] fav=%@ edit{%@}", label,
+                          (NSApp.isActive && wc.window?.isKeyWindow == true) ? 1 : 0, disk(),
+                          wc.debugTreeChildNames(of: parent).joined(separator: ","), wc.debugCurrentDirectory(),
+                          wc.debugListMessage(), wc.debugTreeFavorites().filter { $0.hasPrefix(parent.path) }.description,
+                          wc.debugTreeEditState())
+                }
+                at(0.8) {
+                    NSApp.activate(ignoringOtherApps: true)
+                    wc.window?.makeKeyAndOrderFront(nil)
+                    wc.debugShow(inner)   // 목록 = 대상 안쪽(따라가기 검증) — 펼치기는 reveal이
+                    wc.debugTreeAddFavorite(target)
+                }
+                at(1.8) {
+                    NSLog("TREE_EDIT menu(target): [%@]", wc.debugTreeMenuTitles(forNodeAt: target).joined(separator: " | "))
+                    NSLog("TREE_EDIT menu(home): [%@]", wc.debugTreeMenuTitles(
+                        forNodeAt: FileManager.default.homeDirectoryForCurrentUser).joined(separator: " | "))
+                    NSLog("TREE_EDIT expanded(target)=%d", wc.debugTreeIsExpanded(target) ? 1 : 0)
+                    state("before")
+                    wc.debugTreeBeginRename(target)
+                }
+                at(2.0) {
+                    state("editing")
+                    Self.debugCaptureContent(of: wc.window, to: "/tmp/treefinder-tree-edit.png")
+                    wc.debugRefreshTree(); wc.debugTreeRefreshNode(parent)   // 편집 중 재구성 = 미뤄져야
+                }
+                at(2.4) {
+                    state("afterRefreshWhileEditing")
+                    if let editor = wc.window?.firstResponder as? NSTextView {
+                        editor.string = parts[1] + "-새이름"
+                        editor.insertNewline(nil)   // Return = 확정
+                    }
+                }
+                at(3.4) {
+                    state("afterReturn")
+                    NSLog("TREE_EDIT expanded(renamed)=%d", wc.debugTreeIsExpanded(renamed) ? 1 : 0)
+                    wc.debugTreeBeginRename(renamed)
+                }
+                at(3.7) {
+                    if let editor = wc.window?.firstResponder as? NSTextView {
+                        editor.string = "취소되어야함"
+                        editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))   // Esc = 취소
+                    }
+                }
+                at(4.2) {
+                    state("afterEsc")
+                    wc.debugTreeSelect(renamed)
+                    key("z", 6, [.command])   // 트리 포커스 ⌘Z = 활성 페인 되돌리기
+                }
+                at(5.4) {
+                    state("afterUndoRename")
+                    wc.debugSelectListItem("목록선택.txt")   // 목록 선택이 있어도 트리 ⌘⌫는 트리 폴더만
+                    wc.debugTreeSelect(target)
+                    key("\u{08}", 51, [.command])   // ⌘⌫ (메뉴 키 = NSBackspaceCharacter)
+                }
+                at(7.0) {
+                    NSLog("TREE_EDIT afterTrash targetExists=%d", FileManager.default.fileExists(atPath: target.path) ? 1 : 0)
+                    state("afterTrash")
+                    key("z", 6, [.command])   // 트리 포커스 유지 중 ⌘Z = 휴지통에서 되돌리기
+                }
+                at(8.6) {
+                    NSLog("TREE_EDIT afterUndoTrash targetExists=%d listFileExists=%d",
+                          FileManager.default.fileExists(atPath: target.path) ? 1 : 0,
+                          FileManager.default.fileExists(atPath: inner.appendingPathComponent("목록선택.txt").path) ? 1 : 0)
+                    state("afterUndoTrash")
+                    wc.debugTreeSelect(target)
+                    key("\r", 36, [])   // Return = 이름 변경 시작
+                }
+                at(9.2) {
+                    state("afterReturnKey")
+                    if let editor = wc.window?.firstResponder as? NSTextView {
+                        editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+                    }
+                }
+                // ── 출하 전 검증 지적 회귀 ──
+                at(9.6) {
+                    state("afterEscReturnKey")   // 트리에서 시작 → 포커스 트리 복귀
+                    wc.debugSelectListItem("부모목록.txt")
+                    wc.debugCommitEditing()      // 목록에 포커스(우클릭으로 시작하는 상황)
+                    wc.debugTreeBeginRename(target)
+                }
+                at(10.0) {
+                    if let editor = wc.window?.firstResponder as? NSTextView {
+                        editor.insertText("XYZ", replacementRange: NSRange(location: NSNotFound, length: 0))
+                    }
+                    key("\u{08}", 51, [.command])   // 편집 중 ⌘⌫ — 목록 선택 파일이 지워지면 안 됨
+                }
+                at(10.6) {
+                    NSLog("TREE_EDIT editCmdDelete listFileExists=%d", exists(listFile))
+                    state("editTyped")
+                    key("z", 6, [.command])   // 편집 중 ⌘Z = 입력 되돌리기(파일 작업 아님)
+                }
+                at(11.2) {
+                    state("editUndoTyping")
+                    if let editor = wc.window?.firstResponder as? NSTextView { editor.insertNewline(nil) }   // 무변경 확정
+                }
+                at(11.8) {
+                    state("focusRestored")   // 목록에서 시작 → 포커스 목록(TFTableView) 복귀
+                    wc.debugTreeSelect(target)
+                    key("\u{08}", 51, [.command])
+                    key("\u{08}", 51, [.command], repeat: true)   // 누르고 있기 — 상위 폴더가 연쇄로 지워지면 안 됨
+                }
+                at(13.4) {
+                    NSLog("TREE_EDIT repeat targetExists=%d parentExists=%d", exists(target), exists(parent))
+                    state("afterRepeat")
+                    key("z", 6, [.command])
+                }
+                at(14.8) {
+                    NSLog("TREE_EDIT repeatUndo targetExists=%d", exists(target))
+                    wc.debugRevealTree(link.appendingPathComponent("링크자식"))   // 심링크 노드 아래 펼치기
+                    wc.debugTreeBeginRename(linkChild)
+                }
+                at(15.2) {
+                    NSLog("TREE_EDIT linkEdit tree(링크)=[%@] %@", wc.debugTreeChildNames(of: link).joined(separator: ","),
+                          wc.debugTreeEditState())
+                    if let editor = wc.window?.firstResponder as? NSTextView {
+                        editor.string = "링크자식-새이름"
+                        editor.insertNewline(nil)
+                    }
+                }
+                at(16.0) {
+                    NSLog("TREE_EDIT linkRenamed tree(링크)=[%@] disk(실제)=[%@]",
+                          wc.debugTreeChildNames(of: link).joined(separator: ","),
+                          ((try? FileManager.default.contentsOfDirectory(atPath: linkChild.deletingLastPathComponent().path)) ?? [])
+                            .sorted().joined(separator: ","))
+                    key("z", 6, [.command])
+                }
+                at(17.2) {
+                    NSLog("TREE_EDIT linkUndo tree(링크)=[%@]", wc.debugTreeChildNames(of: link).joined(separator: ","))
+                    let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                    NSLog("TREE_EDIT protected docs=%d docsTarget=%d", SidebarSymbols.isProtected(docs.path) ? 1 : 0,
+                          SidebarSymbols.isProtected(DirectoryLister.resolvedFolder(docs).path) ? 1 : 0)
+                    wc.debugTreeRemoveFavorite(target.path)
+                    // 목록 인라인 이름 편집 중 ⌘⌫ — 편집 중인 그 파일이 휴지통으로 가면 안 됨(2차 검증)
+                    wc.debugSelectListItem("부모목록.txt")
+                    wc.debugCommitEditing()
+                    wc.renameSelected(nil)   // 마우스 메뉴와 같은 경로 = 목록 이름 편집 시작
+                    NSLog("TREE_EDIT listEditStart %@ selected=%@", wc.debugEditingState(), wc.debugSelectedName())
+                }
+                at(17.6) { key("\u{08}", 51, [.command]) }   // 편집이 자리 잡은 뒤 — 같은 블록에서 보내면 처리가 편집 종료 뒤로 밀렸다(실측)
+                at(18.3) {
+                    NSLog("TREE_EDIT listEditCmdDelete listFileExists=%d listEdit=%@ text=%@", exists(listFile), wc.debugEditingState(),
+                          (wc.window?.firstResponder as? NSTextView)?.string ?? "-")
+                    (wc.window?.firstResponder as? NSTextView)?.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+                    wc.debugTreeSelect(target)   // 편집 종료(포커스 이동) — 밀린 키가 있어도 목록 파일을 건드리지 않게
+                }
+                at(18.9) {
+                    state("final")
+                    NSLog("TREE_EDIT done")
+                }
+            }
+        }
         // TF_TREE_NETWORK=1 → 트리 네트워크 그룹 확장(Bonjour 시작) 후 자식 구성(발견 호스트+기억 공유) 로그 검증 (제작자 제보 2026-07-23)
         if ProcessInfo.processInfo.environment["TF_TREE_NETWORK"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { wc.debugExpandNetwork() }
